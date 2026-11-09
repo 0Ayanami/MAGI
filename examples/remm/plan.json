@@ -1,0 +1,13 @@
+{
+  "episode_id": 1,
+  "subgoals": ["place red block on blue block"],
+  "memory": {
+    "objects": [
+      {"id": "red", "description": "red block"},
+      {"id": "blue", "description": "blue block"}
+    ],
+    "goals": [
+      {"subgoal_index": 0, "predicates": [{"name": "on", "args": ["red", "blue"]}]}
+    ]
+  }
+}

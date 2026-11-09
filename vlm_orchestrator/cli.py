@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 
@@ -156,6 +157,27 @@ def main():
     )
 
     # --- Subgoal mode options ---
+    parser.add_argument(
+        "--memory-mode", choices=["off", "current", "episodic"], default="off",
+        help="Independent REMM evidence memory. 'current' uses current-frame "
+             "evidence; 'episodic' also tracks temporal evidence. Default: off.",
+    )
+    parser.add_argument(
+        "--memory-gate", choices=["shadow", "enforce"], default="shadow",
+        help="Log proposed completion checks or enforce them before advancing.",
+    )
+    parser.add_argument(
+        "--memory-max-reobservations", type=int, default=3,
+        help="Additional unsuccessful completion observations before requesting replan.",
+    )
+    parser.add_argument(
+        "--memory-perception-url", default=None,
+        help="Optional HTTP base URL for online RGB-D object grounding.",
+    )
+    parser.add_argument(
+        "--memory-min-confidence", type=float, default=0.8,
+        help="Minimum visual observation confidence for REMM verification.",
+    )
     parser.add_argument(
         "--subgoal-check-mode",
         choices=["vlm", "timer", "hybrid"],
@@ -611,6 +633,24 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.memory_max_reobservations < 0:
+        parser.error("--memory-max-reobservations must be nonnegative")
+    if not math.isfinite(args.memory_min_confidence) or not 0 <= args.memory_min_confidence <= 1:
+        parser.error("--memory-min-confidence must be finite and between zero and one")
+    if args.memory_mode != "off":
+        if args.mode != "subgoal":
+            parser.error("--memory-mode requires --mode subgoal")
+        if args.failure_monitor in {"gt", "gt_hitl", "gt_vlm"}:
+            parser.error("REMM memory uses online evidence and cannot use GT failure monitors")
+        if args.memory_gate == "enforce" and (
+            args.failure_monitor != "vlm" or args.subgoal_check_mode != "vlm"
+            or args.env != "libero"
+            or args.recovery_mode not in {None, "replan"}
+        ):
+            parser.error("--memory-gate enforce requires --env libero, "
+                         "--failure-monitor vlm, --subgoal-check-mode vlm "
+                         "and --recovery-mode replan")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1090,7 +1130,24 @@ def _build_strategy(args):
 
         initial_strategy = _build_initial_strategy(args, ctx)
 
-        return SubgoalStrategy(
+        strategy_type = SubgoalStrategy
+        memory_options = {}
+        memory_mode = getattr(args, "memory_mode", "off")
+        if memory_mode != "off":
+            from vlm_orchestrator.remm_memory.runtime import RemmConfig
+            from vlm_orchestrator.strategies.remm_subgoal import RemmSubgoalStrategy
+
+            strategy_type = RemmSubgoalStrategy
+            memory_options["memory_config"] = RemmConfig(
+                mode=memory_mode,
+                gate=getattr(args, "memory_gate", "shadow"),
+                max_reobservations=getattr(args, "memory_max_reobservations", 3),
+                perception_url=getattr(args, "memory_perception_url", None),
+                env_mode=getattr(args, "env", "robolab"),
+                min_confidence=getattr(args, "memory_min_confidence", 0.8),
+            )
+
+        return strategy_type(
             ctx, subgoal_config, initial_strategy=initial_strategy,
             failure_monitor=args.failure_monitor,
             recovery_mode=args.recovery_mode,
@@ -1105,6 +1162,7 @@ def _build_strategy(args):
             max_grasp_attempts=getattr(args, "max_grasp_attempts", None),
             motion_planner=getattr(args, "motion_planner", "curobo"),
             stack_mode_enabled=getattr(args, "enable_stack_mode", False),
+            **memory_options,
         )
 
     if args.mode == "scene_edit":
