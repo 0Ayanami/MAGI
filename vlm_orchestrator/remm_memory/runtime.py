@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from .perception import (
     GeometryVerifier,
@@ -102,6 +102,7 @@ class MemoryRuntime:
         self.observation_error = None
         self._goal_ids = {}
         self._frame_evidence = {}
+        self._frame_steps = {}
         self._new_events = []
         self._object_specs = {}
         self._completed_contracts = {}
@@ -204,6 +205,7 @@ class MemoryRuntime:
         store = self.store.fork()
         verifier = deepcopy(self.verifier)
         frame_evidence = dict(self._frame_evidence)
+        frame_steps = dict(self._frame_steps)
         try:
             if "observation/remm_objects" in obs:
                 objects = observations_from_payload(
@@ -243,6 +245,13 @@ class MemoryRuntime:
                     ),
                 )
             for object_id, item in objects.items():
+                frame_key = (object_id, item.frame_id)
+                prior_step = frame_steps.get(frame_key)
+                if prior_step is not None and prior_step != step:
+                    item = replace(item, visible=False, confidence=0.0)
+                    objects[object_id] = item
+                else:
+                    frame_steps[frame_key] = step
                 event = Evidence(
                     id=f"plan{self.plan_version}:step{step}:object:{object_id}",
                     step=step,
@@ -321,6 +330,7 @@ class MemoryRuntime:
             self.store = store
             self.verifier = verifier
             self._frame_evidence = frame_evidence
+            self._frame_steps = frame_steps
             self.observation_error = None
         except Exception as error:
             self.results = {}

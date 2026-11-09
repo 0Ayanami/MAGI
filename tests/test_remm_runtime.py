@@ -202,6 +202,19 @@ def test_stale_observation_and_duplicate_evidence_are_rejected():
         memory.observe(observation(0), 0)
 
 
+def test_reused_old_negative_frame_cannot_revoke_fresh_completion():
+    memory = runtime()
+    old_negative = observation(0, moved=True)
+    memory.observe(old_negative, 0)
+    memory.observe(observation(5), 5)
+    memory.observe(observation(10), 10)
+    memory.mark_complete(0)
+    memory.observe(old_negative, 15)
+    assert memory.check_completion(0, 15)["status"] == "UNKNOWN"
+    assert not memory.broken_goals
+    assert memory.store.current_truth(Predicate("on", ("red", "blue"))) == Truth.TRUE
+
+
 def test_cpu_replay_command_exports_evidence_and_revocation(tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(
