@@ -177,6 +177,24 @@ class AppServer:
         )
         self._send("initialized", {})
 
+    def _quota_snapshot(self, phase, request_dir, deadline, audit):
+        """Record account counters without guessing per-turn credit charges."""
+        started = time.monotonic()
+        snapshot = {"timestamp": time.time(), "scope": "account"}
+        try:
+            snapshot["rate_limits"] = self._request(
+                "account/rateLimits/read", {},
+                min(deadline, time.monotonic() + 5), audit,
+            )
+            snapshot["status"] = "available"
+        except (RuntimeError, TimeoutError) as error:
+            snapshot.update(status="unavailable", error=str(error))
+        snapshot["latency_s"] = time.monotonic() - started
+        (request_dir / f"quota-{phase}.json").write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return snapshot
+
     def run(self, payload, request_dir, timeout):
         deadline = time.monotonic() + timeout
         inputs = convert_messages(payload["messages"])
@@ -186,6 +204,7 @@ class AppServer:
         ) as audit:
             try:
                 self._start(deadline, audit)
+                quota_before = self._quota_snapshot("before", request_dir, deadline, audit)
                 started = self._request(
                     "thread/start",
                     {
@@ -211,6 +230,7 @@ class AppServer:
                     audit,
                 )
                 self.turn_id = turn["turn"]["id"]
+                turn_started = time.monotonic()
                 final = None
                 usage = None
                 while True:
@@ -244,6 +264,8 @@ class AppServer:
                 parsed = parse_json(final)
                 if not isinstance(parsed, dict):
                     raise RuntimeError("Codex response must be a JSON object")
+                turn_latency = time.monotonic() - turn_started
+                quota_after = self._quota_snapshot("after", request_dir, deadline, audit)
                 return {
                     "text": json.dumps(parsed, ensure_ascii=False),
                     "raw_text": final,
@@ -251,6 +273,9 @@ class AppServer:
                     "turn_id": self.turn_id,
                     "model": model,
                     "usage": usage,
+                    "turn_latency_s": turn_latency,
+                    "quota_before": quota_before,
+                    "quota_after": quota_after,
                 }
             except Exception:
                 self.close()
@@ -330,6 +355,7 @@ def build_app(
         )
         started = time.monotonic()
         async with lock:
+            acquired = time.monotonic()
             try:
                 result = await asyncio.to_thread(
                     server.run, payload, request_dir, timeout
@@ -346,6 +372,8 @@ def build_app(
         record = {
             **result,
             "latency_s": time.monotonic() - started,
+            "queue_wait_s": acquired - started,
+            "service_latency_s": time.monotonic() - acquired,
             "effort": effort,
             "requested_max_tokens": payload.get(
                 "max_tokens", payload.get("max_completion_tokens")

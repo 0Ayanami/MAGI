@@ -22,6 +22,8 @@ perception_url=${MEMORY_PERCEPTION_URL:-http://127.0.0.1:18003}
 confidence=${MEMORY_MIN_CONFIDENCE:-0.8}
 task_suite=${SMOKE_TASK_SUITE:-libero_spatial}
 task_filter=${SMOKE_TASK_FILTER:-from_table_center}
+terminal_mode=${SMOKE_TERMINAL_MODE:-hold}
+case "$terminal_mode" in hold|policy) ;; *) echo "SMOKE_TERMINAL_MODE must be hold or policy" >&2; exit 2 ;; esac
 
 printf 'run=%s\n' "$run"
 {
@@ -31,6 +33,7 @@ printf 'run=%s\n' "$run"
     printf 'memory_mode=episodic\nmemory_gate=%s\nmemory_min_confidence=%s\n' "$gate" "$confidence"
     printf 'vlm_base_url=%s\nvlm_model=%s\nperception_url=%s\n' "$VLM_BASE_URL" "$VLM_MODEL" "$perception_url"
     printf 'policy_port=%s\nproxy_port=%s\nmonitor_interval=40\nterminal_observations=2\nterminal_observation_interval=40\n' "$policy_port" "$proxy_port"
+    printf 'terminal_action_mode=%s\n' "$terminal_mode"
 } >"$run/config.txt"
 
 curl -fsS --max-time 5 "http://127.0.0.1:$policy_port/healthz" >/dev/null
@@ -76,6 +79,7 @@ PYTHONPATH="$root:$stage/libero-source" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
     --host 127.0.0.1 --port "$proxy_port" --task-suite-name "$task_suite" \
     --task-filter "$task_filter" --max-tasks 1 --num-trials-per-task 1 --seed 7 \
     --terminal-observations 2 --terminal-observation-interval 40 \
+    --terminal-action-mode "$terminal_mode" \
     --enable-depth --enable-gt-state --log-dir "$run/eval" --video-out-path "$run/videos" \
     2>&1 | tee "$run/eval.log"
 

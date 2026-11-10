@@ -33,6 +33,36 @@ specified log directory. Caller token limits are recorded as unapplied because
 this App Server path controls its own generation budget. Model or transport
 errors return HTTP 503 and remain visible in the experiment logs.
 
+## Required accounting for the next experiment
+
+Fix the Codex model to `gpt-6.1-sol` and reasoning effort to `low` using the
+bridge command above. Record the actual returned model and requested effort.
+Keep each experiment in a separate log directory, including warmup requests.
+
+For every plan/monitor/replan request retain `result.json`, exact request,
+thread/turn IDs and raw App Server events. Record end-to-end `latency_s`,
+`queue_wait_s`, `service_latency_s` and `turn_latency_s` (from turn/start reply
+to completion, excluding quota sampling). Report count, total, median and p95
+by request type; report episode wall time and simulated steps separately.
+Keep VLA, memory and perception timing from their respective runtime logs,
+and keep warmup/model-loading and post-success audit timing separate.
+
+Token accounting uses `usage.total` once per ephemeral thread: input, cached
+input, output, reasoning output and total. Cached input is part of input;
+reasoning output is part of output. Never add them a second time. Missing
+usage means unavailable, not zero. Failed requests and retries remain in raw
+events; usage may be incomplete if the server never reports it.
+
+The bridge now samples `account/rateLimits/read` before and after each turn,
+persisting `quota-before.json` and `quota-after.json`, including timestamps,
+window IDs/reset times and any returned credit balance. Unsupported or timed
+out sampling is explicitly marked unavailable and does not invent a charge.
+Only compare percentage points within the same bucket and reset window;
+resets, rounding and concurrent account use prevent attributing all changes
+to this experiment. Report actual credit balances/deltas only when returned.
+Token totals are not a conversion formula for subscription quota or currency.
+See [official App Server accounting](https://learn.chatgpt.com/docs/app-server).
+
 Once the actual policy and online perception services are ready on the server,
 run the prepared script from that checkout.
 
@@ -83,6 +113,14 @@ outcome and primary rollout length are recorded before the audit. Terminal
 stability, simulation steps and observations are recorded separately. This
 success-triggered audit supplies final placement evidence without adding the
 success flag to the model inputs.
+
+If the first success frame still has a closed gripper, a hold audit cannot test
+the policy's later release. For a separately labelled bounded continuation,
+set `SMOKE_TERMINAL_MODE=policy`. The policy then executes up to 40 additional
+real actions, refreshing at the normal five-action replanning interval. No
+release command is injected. The audit records policy actions, query steps and
+stability separately; it does not change the captured primary outcome. This
+mode may reveal later placement failure as well as successful release.
 
 ## Preparation result on 2026-11-09
 

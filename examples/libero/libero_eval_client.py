@@ -175,10 +175,11 @@ class Args:
     """LIBERO-plus difficulty level to keep (1-5).  0 = no level filter."""
 
     terminal_observations: int = 0
-    """Additional post-success observation queries. Returned policy actions are
-    discarded while measured zero-displacement holds advance the simulation."""
+    """Additional post-success observation samples, separate from primary metrics."""
     terminal_observation_interval: int = 40
-    """Actual hold simulation steps between post-success observation queries."""
+    """Actual simulation steps between post-success observation samples."""
+    terminal_action_mode: str = "hold"
+    """Post-success execution: measured holds, or continued policy actions."""
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -459,6 +460,10 @@ def eval_libero(args: Args) -> None:
         or args.terminal_observation_interval < 1
     ):
         raise ValueError("Terminal count must be nonnegative and interval positive")
+    if args.terminal_action_mode not in {"hold", "policy"}:
+        raise ValueError("Terminal action mode must be hold or policy")
+    if args.terminal_action_mode == "policy" and args.replan_steps < 1:
+        raise ValueError("Policy terminal audits require positive replan steps")
     from libero.libero import benchmark as libero_benchmark
     from openpi_client import websocket_client_policy
 
@@ -961,7 +966,7 @@ def eval_libero(args: Args) -> None:
                     n_total = 0
 
             # Post-success audit samples the real success frame and later
-            # measured holds. Primary outcome, step count and duration above
+            # bounded execution. Primary outcome, step count and duration above
             # are captured before these optional extra simulation steps.
             if episode_success and args.terminal_observations:
                 from vlm_orchestrator.aux_benchmarks.libero_terminal import (
@@ -995,9 +1000,11 @@ def eval_libero(args: Args) -> None:
                     step_interval=args.terminal_observation_interval,
                     build_observation=build_terminal_observation,
                     record_frame=record_terminal_frame,
+                    action_mode=args.terminal_action_mode,
+                    policy_replan_steps=args.replan_steps,
                 )
                 episode_metadata["terminal_verification"] = terminal
-                episode_metadata["terminal_steps"] = terminal["held_steps"]
+                episode_metadata["terminal_steps"] = terminal["executed_steps"]
                 episode_metadata["terminal_stability_success"] = (
                     terminal["stability_success"] if terminal["complete"] else None
                 )
@@ -1007,6 +1014,7 @@ def eval_libero(args: Args) -> None:
                     logger.info(
                         f"  Terminal observations: {len(terminal['observations'])} "
                         f"| hold steps: {terminal['held_steps']} "
+                        f"| policy steps: {terminal['policy_actions_executed']} "
                         f"| final success: {terminal['stability_success']}"
                     )
 

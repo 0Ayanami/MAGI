@@ -71,6 +71,8 @@ class ScriptedAppServer(AppServer):
 
     def _request(self, method, params, deadline, audit):
         self.requests.append((method, params))
+        if method == "account/rateLimits/read":
+            return {"rateLimits": {"primary": {"usedPercent": len(self.requests)}}}
         if method == "thread/start":
             return {"thread": {"id": "thread1"}, "model": self.model}
         return {"turn": {"id": "turn1"}}
@@ -113,8 +115,26 @@ def test_app_server_turn_records_actual_result_and_usage(tmp_path):
     assert json.loads(result["text"]) == {"action": "next"}
     assert result["usage"]["total"]["inputTokens"] == 20
     assert result["thread_id"] == "thread1"
-    assert server.requests[0][1]["ephemeral"] is True
-    assert server.requests[1][1]["effort"] == "low"
+    requests = dict(server.requests)
+    assert requests["thread/start"]["ephemeral"] is True
+    assert requests["turn/start"]["effort"] == "low"
+    assert result["quota_before"]["rate_limits"]["rateLimits"]["primary"]["usedPercent"] == 1
+    assert result["quota_after"]["rate_limits"]["rateLimits"]["primary"]["usedPercent"] == 4
+    assert result["turn_latency_s"] >= 0
+
+
+def test_quota_unavailable_is_explicit_not_zero(tmp_path):
+    server = ScriptedAppServer([], tmp_path)
+
+    def unsupported(*args):
+        raise RuntimeError("unsupported method")
+
+    server._request = unsupported
+    with (tmp_path / "events.jsonl").open("w") as audit:
+        result = server._quota_snapshot("before", tmp_path, time.monotonic() + 10, audit)
+    assert result["status"] == "unavailable"
+    assert "rate_limits" not in result
+    assert json.loads((tmp_path / "quota-before.json").read_text())["error"] == "unsupported method"
 
 
 @pytest.mark.parametrize(

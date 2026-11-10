@@ -53,7 +53,17 @@ def builder(gripper=0.0):
     return build
 
 
-def capture(env, client, *, count=2, interval=3, build=None, record=None):
+def capture(
+    env,
+    client,
+    *,
+    count=2,
+    interval=3,
+    build=None,
+    record=None,
+    action_mode="hold",
+    policy_replan_steps=5,
+):
     return capture_terminal_observations(
         env,
         client,
@@ -63,6 +73,8 @@ def capture(env, client, *, count=2, interval=3, build=None, record=None):
         step_interval=interval,
         build_observation=build or builder(),
         record_frame=record,
+        action_mode=action_mode,
+        policy_replan_steps=policy_replan_steps,
     )
 
 
@@ -133,6 +145,93 @@ def test_transport_failure_stops_audit_without_any_returned_action_execution():
     assert env.actions == [[0.0] * 6 + [-1.0]] * 3
 
 
+def test_policy_audit_consumes_chunks_at_client_cadence_and_refills_real_frames():
+    class ChunkClient(Client):
+        def infer(self, observation):
+            response = super().infer(observation)
+            first = 2 * (len(self.queries) - 1) + 1
+            response["actions"] = np.array(
+                [[value] * 7 for value in [first, first + 1, 901, 902]],
+                dtype=float,
+            )
+            return response
+
+    env, client = Environment(), ChunkClient()
+    frames = []
+    result = capture(
+        env,
+        client,
+        interval=6,
+        action_mode="policy",
+        policy_replan_steps=2,
+        record=lambda wire, step, response: frames.append(
+            (wire["observation/image"], step)
+        ),
+    )
+    assert result["complete"]
+    assert result["action_mode"] == "policy"
+    assert result["policy_replan_steps"] == 2
+    assert env.actions == [[value] * 7 for value in range(1, 7)]
+    assert result["policy_actions_executed"] == result["executed_steps"] == 6
+    assert result["held_steps"] == result["memory_hold_steps"] == 0
+    assert result["query_count"] == 4
+    assert [q["__step"] for q in client.queries] == [11, 13, 15, 17]
+    assert [q["observation/image"] for q in client.queries] == [
+        "actual-success",
+        2,
+        4,
+        6,
+    ]
+    assert [q["kind"] for q in result["queries"]] == [
+        "sample",
+        "refill",
+        "refill",
+        "sample",
+    ]
+    assert [q["step"] for q in result["observations"]] == [11, 17]
+    assert all(q["__episode_id"] == "2_0" for q in client.queries)
+    assert all("ground_truth_done" not in q for q in client.queries)
+    assert frames == [("actual-success", 11)] + [(i, 11 + i) for i in range(1, 7)]
+
+
+@pytest.mark.parametrize(
+    "bad_actions",
+    [None, [], [0.0] * 7, [[0.0] * 6], [[float("nan")] * 7], [[float("inf")] * 7]],
+)
+def test_policy_audit_rejects_malformed_actions_before_any_execution(bad_actions):
+    class MalformedClient(Client):
+        def infer(self, observation):
+            return {**super().infer(observation), "actions": bad_actions}
+
+    env, client = Environment(), MalformedClient()
+    result = capture(env, client, action_mode="policy")
+    assert result["complete"] is False
+    assert "finite nonempty Nx7" in result["error"]
+    assert result["query_count"] == 1
+    assert result["executed_steps"] == 0
+    assert env.actions == []
+
+
+def test_policy_audit_refills_short_chunks_and_counts_memory_holds_separately():
+    class ShortClient(Client):
+        def infer(self, observation):
+            response = super().infer(observation)
+            response["actions"] = np.zeros((1, 7))
+            response["orchestrator_memory_hold"] = len(self.queries) == 2
+            return response
+
+    env, client = Environment(success=[True, False, True]), ShortClient()
+    result = capture(env, client, action_mode="policy")
+    assert result["complete"]
+    assert [q["__step"] for q in client.queries] == [11, 12, 13, 14]
+    assert result["executed_steps"] == 3
+    assert result["policy_actions_executed"] == 2
+    assert result["held_steps"] == result["memory_hold_steps"] == 1
+    assert result["all_executed_steps_success"] is False
+    assert result["all_held_steps_success"] is False
+    assert result["stability_success"] is True
+
+
 @pytest.mark.parametrize("gripper", [None, [], [0, 1], float("nan"), 1.5])
 def test_invalid_gripper_data_never_produces_a_hold_or_query(gripper):
     env, client = Environment(), Client()
@@ -156,11 +255,16 @@ def test_invalid_audit_limits_are_rejected(count, interval):
         capture(None, None, count=count, interval=interval)
 
 
-@pytest.mark.parametrize("terminal_count", [0, 2])
+@pytest.mark.parametrize(
+    ("terminal_count", "action_mode", "fail_at"),
+    [(0, "hold", None), (2, "hold", None), (2, "policy", None), (2, "policy", 3)],
+)
 def test_eval_entry_preserves_primary_success_when_audit_holds_disturb_scene(
     monkeypatch,
     tmp_path,
     terminal_count,
+    action_mode,
+    fail_at,
 ):
     # Dependency doubles allow the real client control loop to run on CPU.
     # All VLA actions and hold actions still traverse env.step below.
@@ -195,7 +299,7 @@ def test_eval_entry_preserves_primary_success_when_audit_holds_disturb_scene(
     monkeypatch.setitem(sys.modules, "libero", libero)
     monkeypatch.setitem(sys.modules, "libero.libero", libero_inner)
 
-    client = Client()
+    client = Client(fail_at=fail_at)
     original_infer = client.infer
 
     def infer(wire):
@@ -247,6 +351,7 @@ def test_eval_entry_preserves_primary_success_when_audit_holds_disturb_scene(
         num_trials_per_task=1,
         terminal_observations=terminal_count,
         terminal_observation_interval=2,
+        terminal_action_mode=action_mode,
     )
     module.eval_libero(args)
     metadata = json.loads((tmp_path / "eval_metadata.json").read_text())
@@ -256,7 +361,7 @@ def test_eval_entry_preserves_primary_success_when_audit_holds_disturb_scene(
     if terminal_count == 0:
         assert len(env.actions) == len(client.queries) == 1
         assert "terminal_verification" not in metadata
-    else:
+    elif action_mode == "hold":
         assert len(client.queries) == 3
         assert env.actions[1:] == [[0.0] * 6 + [-1.0]] * 2
         assert metadata["terminal_steps"] == 2
@@ -264,3 +369,19 @@ def test_eval_entry_preserves_primary_success_when_audit_holds_disturb_scene(
         audit = metadata["terminal_verification"]
         assert audit["complete"]
         assert [row["step"] for row in audit["observations"]] == [1, 3]
+    else:
+        audit = metadata["terminal_verification"]
+        assert audit["action_mode"] == "policy"
+        assert audit["policy_replan_steps"] == 1
+        assert env.actions == [[99.0] * 7] * (2 if fail_at else 3)
+        assert metadata["terminal_steps"] == (1 if fail_at else 2)
+        assert audit["policy_actions_executed"] == metadata["terminal_steps"]
+        assert [q["__step"] for q in client.queries[1:]] == (
+            [1, 2] if fail_at else [1, 2, 3]
+        )
+        assert audit["complete"] is (fail_at is None)
+        if fail_at:
+            assert "transport disconnected" in audit["error"]
+            assert metadata["terminal_stability_success"] is None
+        else:
+            assert metadata["terminal_stability_success"] is False
