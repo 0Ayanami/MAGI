@@ -20,15 +20,17 @@ policy_port=${SMOKE_POLICY_PORT:-18002}
 proxy_port=${SMOKE_PROXY_PORT:-18001}
 perception_url=${MEMORY_PERCEPTION_URL:-http://127.0.0.1:18003}
 confidence=${MEMORY_MIN_CONFIDENCE:-0.8}
+task_suite=${SMOKE_TASK_SUITE:-libero_spatial}
+task_filter=${SMOKE_TASK_FILTER:-from_table_center}
 
 printf 'run=%s\n' "$run"
 {
     printf 'commit=%s\n' "$(git rev-parse HEAD)"
     printf 'branch=%s\n' "$(git branch --show-current)"
-    printf 'suite=libero_spatial\ntask_filter=from_table_center\nseed=7\ninitial_state_index=0\n'
+    printf 'suite=%s\ntask_filter=%s\nseed=7\ninitial_state_index=0\n' "$task_suite" "$task_filter"
     printf 'memory_mode=episodic\nmemory_gate=%s\nmemory_min_confidence=%s\n' "$gate" "$confidence"
     printf 'vlm_base_url=%s\nvlm_model=%s\nperception_url=%s\n' "$VLM_BASE_URL" "$VLM_MODEL" "$perception_url"
-    printf 'policy_port=%s\nproxy_port=%s\nmonitor_interval=40\n' "$policy_port" "$proxy_port"
+    printf 'policy_port=%s\nproxy_port=%s\nmonitor_interval=40\nterminal_observations=2\nterminal_observation_interval=40\n' "$policy_port" "$proxy_port"
 } >"$run/config.txt"
 
 curl -fsS --max-time 5 "http://127.0.0.1:$policy_port/healthz" >/dev/null
@@ -71,8 +73,9 @@ done
 PYTHONPATH="$root:$stage/libero-source" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
     MUJOCO_EGL_DEVICE_ID="${SMOKE_EGL_GPU:-2}" \
     "$stage/.libero311-venv/bin/python" -B examples/libero/run_eval.py \
-    --host 127.0.0.1 --port "$proxy_port" --task-suite-name libero_spatial \
-    --task-filter from_table_center --max-tasks 1 --num-trials-per-task 1 --seed 7 \
+    --host 127.0.0.1 --port "$proxy_port" --task-suite-name "$task_suite" \
+    --task-filter "$task_filter" --max-tasks 1 --num-trials-per-task 1 --seed 7 \
+    --terminal-observations 2 --terminal-observation-interval 40 \
     --enable-depth --enable-gt-state --log-dir "$run/eval" --video-out-path "$run/videos" \
     2>&1 | tee "$run/eval.log"
 

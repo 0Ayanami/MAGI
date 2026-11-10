@@ -174,6 +174,12 @@ class Args:
     task_difficulty: int = 0
     """LIBERO-plus difficulty level to keep (1-5).  0 = no level filter."""
 
+    terminal_observations: int = 0
+    """Additional post-success observation queries. Returned policy actions are
+    discarded while measured zero-displacement holds advance the simulation."""
+    terminal_observation_interval: int = 40
+    """Actual hold simulation steps between post-success observation queries."""
+
 
 # ──────────────────────────────────────────────────────────────────
 # Observation packaging
@@ -244,14 +250,12 @@ def build_wire_obs(
         obs["robot0_gripper_qpos"],
     ])
 
-    # Gripper width: mean of two finger joint positions.
-    # gripper_qpos values are ~0.04 when open, ~0.0 when closed.
-    # The failure detector expects a scalar where higher = more closed,
-    # so we invert: 1 - (mean_qpos / 0.04) gives ~0 open, ~1 closed.
-    raw_grip = float(np.mean(obs["robot0_gripper_qpos"]))
-    # Normalise: robosuite Panda gripper range is [0, 0.04]
-    grip_normalised = np.array([1.0 - min(raw_grip / 0.04, 1.0)],
-                               dtype=np.float64)
+    # Panda fingers have opposite joint signs. Average their magnitudes so
+    # an open gripper reports 0 rather than cancelling into a closed reading.
+    from vlm_orchestrator.aux_benchmarks.libero_observation import (
+        normalized_panda_gripper,
+    )
+    grip_normalised = normalized_panda_gripper(obs["robot0_gripper_qpos"])
 
     wire = {
         # ── Policy inputs (forwarded to policy server) ──
@@ -449,6 +453,12 @@ def get_max_steps(task_suite_name: str) -> int:
 
 def eval_libero(args: Args) -> None:
     """Run LIBERO evaluation through the VLM-orchestrator proxy."""
+    if (
+        type(args.terminal_observations) is not int or args.terminal_observations < 0
+        or type(args.terminal_observation_interval) is not int
+        or args.terminal_observation_interval < 1
+    ):
+        raise ValueError("Terminal count must be nonnegative and interval positive")
     from libero.libero import benchmark as libero_benchmark
     from openpi_client import websocket_client_policy
 
@@ -684,12 +694,14 @@ def eval_libero(args: Args) -> None:
 
             t = 0
             done = False
+            last_observation_step = 0
 
             while t < max_steps + args.num_steps_wait:
                 try:
                     # Wait for objects to settle in sim.
                     if t < args.num_steps_wait:
                         obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
+                        last_observation_step = t + 1
                         t += 1
                         continue
 
@@ -846,6 +858,7 @@ def eval_libero(args: Args) -> None:
                     # Pop next action and execute in environment.
                     action = action_plan.popleft()
                     obs, reward, done, info = env.step(action.tolist())
+                    last_observation_step = t + 1
 
                     # LIBERO-Mem: advance subgoal counters each step.
                     # Capture the return so the sequence-tracker `done`
@@ -946,6 +959,56 @@ def eval_libero(args: Args) -> None:
                     psr = None
                     n_done = 0
                     n_total = 0
+
+            # Post-success audit samples the real success frame and later
+            # measured holds. Primary outcome, step count and duration above
+            # are captured before these optional extra simulation steps.
+            if episode_success and args.terminal_observations:
+                from vlm_orchestrator.aux_benchmarks.libero_terminal import (
+                    capture_terminal_observations,
+                )
+
+                def build_terminal_observation(current_obs):
+                    wire = build_wire_obs(
+                        current_obs, task_description, args.resize_size,
+                        camera_K=camera_K, camera_extrinsic=camera_extrinsic,
+                        depth_near=depth_near, depth_far=depth_far,
+                    )
+                    wire["__episode_id"] = f"{task_id}_{episode_idx}"
+                    if gt_exporter is not None:
+                        wire["gt_state"] = gt_exporter.export(current_obs)
+                    return wire
+
+                def record_terminal_frame(wire, step, response):
+                    raw = wire["observation/image"]
+                    if raw_writer is not None:
+                        raw_writer.add_frame(raw)
+                        annotated_writer.add_frame(
+                            wire.get("observation/image_raw", raw),
+                            step=step, response=response,
+                        )
+
+                terminal = capture_terminal_observations(
+                    env, client, obs,
+                    start_step=last_observation_step,
+                    count=args.terminal_observations,
+                    step_interval=args.terminal_observation_interval,
+                    build_observation=build_terminal_observation,
+                    record_frame=record_terminal_frame,
+                )
+                episode_metadata["terminal_verification"] = terminal
+                episode_metadata["terminal_steps"] = terminal["held_steps"]
+                episode_metadata["terminal_stability_success"] = (
+                    terminal["stability_success"] if terminal["complete"] else None
+                )
+                if "error" in terminal:
+                    logger.error(f"  Terminal observation audit failed: {terminal['error']}")
+                else:
+                    logger.info(
+                        f"  Terminal observations: {len(terminal['observations'])} "
+                        f"| hold steps: {terminal['held_steps']} "
+                        f"| final success: {terminal['stability_success']}"
+                    )
 
             results.append(episode_metadata)
 

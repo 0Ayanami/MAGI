@@ -649,7 +649,7 @@ class OrchestratorProxy:
                     "observation/camera_",
                     "gt_seg/",
                 )
-                _STRIP_EXACT = {"gt_state", "ground_truth_done"}
+                _STRIP_EXACT = {"gt_state", "ground_truth_done", "__terminal_observation"}
                 vla_obs = {
                     k: v for k, v in obs.items()
                     if (

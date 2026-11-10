@@ -451,6 +451,12 @@ class RGBDGrounder:
             image, depth, K, transform = self._camera_inputs(obs)
         except (KeyError, ValueError, TypeError):
             return result
+        # Descriptions refer to the policy image seen by the VLM. LIBERO's
+        # camera calibration instead uses the horizontally unmirrored frame.
+        unmirror_projection = (
+            self.env_mode == "libero" and "observation/image_for_grasp" not in obs
+        )
+        projection_depth = depth[:, ::-1] if unmirror_projection else depth
         masks = {}
         for index, spec in enumerate(objects):
             description = spec.get("description", "").strip()
@@ -494,8 +500,8 @@ class RGBDGrounder:
                     continue
                 observed = observation_from_mask(
                     spec["id"],
-                    depth,
-                    mask,
+                    projection_depth,
+                    np.fliplr(mask) if unmirror_projection else mask,
                     K,
                     transform,
                     frame_id=frame_id,
@@ -534,8 +540,8 @@ class RGBDGrounder:
             image = np.asarray(obs["observation/image_for_grasp"])
             depth = np.asarray(obs["observation/depth_for_grasp"])
         elif self.env_mode == "libero":
-            image = np.asarray(obs["observation/image_raw"])[:, ::-1]
-            depth = np.asarray(obs["observation/depth_agentview"])[:, ::-1]
+            image = np.asarray(obs["observation/image_raw"])
+            depth = np.asarray(obs["observation/depth_agentview"])
         else:
             image = np.asarray(obs["observation/exterior_image_1_left_raw"])
             depth = np.asarray(obs["observation/depth_external"])

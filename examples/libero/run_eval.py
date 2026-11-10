@@ -46,6 +46,10 @@ def main():
     parser.add_argument("--task-suite-name", default="libero_10")
     parser.add_argument("--num-steps-wait", type=int, default=10)
     parser.add_argument("--num-trials-per-task", type=int, default=50)
+    parser.add_argument("--terminal-observations", type=int, default=0,
+                       help="Post-success observation queries with returned actions discarded.")
+    parser.add_argument("--terminal-observation-interval", type=int, default=40,
+                       help="Actual zero-displacement hold steps between terminal queries.")
     parser.add_argument("--enable-depth", action="store_true", default=False)
     parser.add_argument("--enable-gt-state", action="store_true", default=False)
     parser.add_argument("--video-out-path", default="results/libero/videos")
@@ -57,6 +61,8 @@ def main():
                        help="Max tasks to evaluate (0=all). Sampled randomly with --seed.")
 
     cli = parser.parse_args()
+    if cli.terminal_observations < 0 or cli.terminal_observation_interval < 1:
+        parser.error("Terminal count must be nonnegative and interval positive.")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -71,6 +77,8 @@ def main():
         task_suite_name=cli.task_suite_name,
         num_steps_wait=cli.num_steps_wait,
         num_trials_per_task=cli.num_trials_per_task,
+        terminal_observations=cli.terminal_observations,
+        terminal_observation_interval=cli.terminal_observation_interval,
         enable_depth=cli.enable_depth,
         enable_gt_state=cli.enable_gt_state,
         video_out_path=cli.video_out_path,

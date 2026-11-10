@@ -43,13 +43,28 @@ export MEMORY_GATE=shadow
 bash scripts/run_remm_libero_smoke.sh
 ```
 
-The fixed selection is standard `libero_spatial` task 2, selected by
+The default selection is standard `libero_spatial` task 2, selected by
 `from_table_center`, seed 7 and initial state index 0. Its task is to put the
 black bowl on the plate, which uses the registered `on` relation. The script
 starts and cleans up its own orchestrator. VLA, perception and SSH-forward
 process lifetimes are managed by the experiment owner. Results include exact
 configuration, health replies, orchestrator logs, episode metadata and videos.
 Set `MEMORY_GATE=enforce` for a separately recorded gate experiment.
+
+For the 2026-11-10 live smoke, use `SMOKE_TASK_SUITE=libero_goal` and
+`SMOKE_TASK_FILTER=put_the_bowl_on_the_plate` (task 8, seed 7, initial state 0).
+The default spatial task contains several similar bowls; goal task 8 has one
+black bowl and one white plate with a red rim. RGB-only prewarming measured
+detector scores 0.610 and 0.729 with these distinguishing descriptions, so this
+run explicitly sets `MEMORY_MIN_CONFIDENCE=0.4`. Actual descriptions and
+completion contracts must still come from the real Codex plan. Do not replace
+them with a fixed plan or ground-truth object bindings.
+
+CUDA allocation was verified again on GPU 2 on 2026-11-10. The local pi05 VLA
+is hosted on GPU 2 and real GDino/SAM2 perception on GPU 0. Detection uses the
+same image orientation as Codex; masks and depth are converted together for
+metric projection. Panda's signed finger positions are normalized using their
+magnitudes so an open gripper correctly supplies release evidence.
 
 The confidence default is 0.8. Inspect actual detector scores before choosing
 and recording a different `MEMORY_MIN_CONFIDENCE`. Prewarm the real perception
@@ -61,9 +76,13 @@ Containment needs independently estimated container interior geometry.
 For a complete smoke result, inspect successful Codex plan and monitor calls,
 valid memory contracts, multiple accepted online object observations with world
 geometry, and actual VLA action responses. Report LIBERO task outcome and memory
-verification separately. The current eval client ends immediately after success,
-so an extra terminal observation or a terminal-frame replay is needed to verify
-the last placement after the environment declares success.
+verification separately. The prepared script requests two optional post-success
+observations, separated by 40 real simulation steps of measured zero-displacement
+hold. Returned policy actions are discarded during this audit. The first task
+outcome and primary rollout length are recorded before the audit. Terminal
+stability, simulation steps and observations are recorded separately. This
+success-triggered audit supplies final placement evidence without adding the
+success flag to the model inputs.
 
 ## Preparation result on 2026-11-09
 

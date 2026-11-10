@@ -149,6 +149,7 @@ def test_remm_payload_is_consumed_and_stripped_before_backend_inference(monkeypa
         0,
         **{
             "observation/remm_debug": "private memory data",
+            "__terminal_observation": True,
             "gt_state": {"objects": {"red": {"holding": True}}},
         },
     )
@@ -163,6 +164,7 @@ def test_remm_payload_is_consumed_and_stripped_before_backend_inference(monkeypa
     forwarded = backend.observations[0]
     assert not any(key.startswith("observation/remm_") for key in forwarded)
     assert "gt_state" not in forwarded
+    assert "__terminal_observation" not in forwarded
     assert forwarded["prompt"] == PLAN["subgoals"][0]
     assert np.array_equal(forwarded["observation/image"], obs["observation/image"])
     assert np.all(session.responses[0]["actions"] == 0.25)

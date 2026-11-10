@@ -266,7 +266,7 @@ def camera_observation():
     }
 
 
-def test_live_grounder_uses_perception_only_and_unmirrors_libero():
+def test_live_grounder_uses_perception_only_and_preserves_policy_image():
     client = FakePerceptionClient()
     obs = camera_observation()
     result = RGBDGrounder(client).observe(
@@ -275,13 +275,68 @@ def test_live_grounder_uses_perception_only_and_unmirrors_libero():
     assert result["red"].visible
     assert result["red"].position == (0, 0, 1)
     assert result["red"].holding is False
-    assert np.array_equal(client.images[0], obs["observation/image_raw"][:, ::-1])
+    assert np.array_equal(client.images[0], obs["observation/image_raw"])
     obs["observation/gripper_position"] = np.array([1.0])
     assert (
         RGBDGrounder(client)
         .observe(obs, [{"id": "red", "description": "red block"}], 1)["red"]
         .holding
         is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "image_for_grasp", "expected_x"),
+    [
+        ("libero", False, 1.0),
+        ("libero", True, -1.0),
+        ("robolab", False, -1.0),
+        ("vlabench", False, -1.0),
+        ("robocasa", False, -1.0),
+    ],
+)
+def test_grounder_preserves_detection_frame_and_projects_registered_mask_depth(
+    env_mode, image_for_grasp, expected_x
+):
+    class LeftHalfClient(FakePerceptionClient):
+        def segment(self, image, point_x, point_y, *, box):
+            self.images.append(image.copy())
+            assert (point_x, point_y) == (0.25, 0.5)
+            assert box == (0, 0, 4, 4)
+            mask = np.zeros(image.shape[:2], dtype=bool)
+            mask[:, :4] = True
+            return mask, self.score
+
+    image = np.arange(96, dtype=np.uint8).reshape(4, 8, 3)
+    depth = np.ones((4, 8))
+    depth[:, 4:] = 2.0
+    obs = camera_observation()
+    obs["observation/camera_K"] = np.array(
+        [[2, 0, 3.5], [0, 2, 1.5], [0, 0, 1]]
+    )
+    if image_for_grasp:
+        obs["observation/image_for_grasp"] = image
+        obs["observation/depth_for_grasp"] = depth
+    elif env_mode == "libero":
+        obs["observation/image_raw"] = image
+        obs["observation/depth_agentview"] = depth
+    else:
+        obs["observation/exterior_image_1_left_raw"] = image
+        obs["observation/depth_external"] = depth
+    client = LeftHalfClient()
+    observed = RGBDGrounder(client, env_mode=env_mode).observe(
+        obs, [{"id": "left", "description": "the block on the left"}], 0
+    )["left"]
+
+    # Both services see the same image as the description author. The 16 masked
+    # left pixels have depth 1; LIBERO calibration places them on the right.
+    assert len(client.images) == 2
+    assert all(np.array_equal(seen, image) for seen in client.images)
+    assert observed.visible
+    assert observed.position == (expected_x, 0.0, 1.0)
+    assert observed.bounds == (
+        (expected_x - 0.75, -0.75, 1.0),
+        (expected_x + 0.75, 0.75, 1.0),
     )
 
 
