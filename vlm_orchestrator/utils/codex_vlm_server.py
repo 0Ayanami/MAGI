@@ -19,10 +19,28 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
 from vlm_orchestrator.vlm import parse_json
+
+
+def _provider_key(env_name: str, env_file: Path) -> str:
+    """Read one credential without importing other settings into the process."""
+    key = os.environ.get(env_name, "").strip()
+    if key:
+        return key
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+            name, separator, value = line.partition("=")
+            if separator and name.strip() == env_name:
+                key = value.strip()
+                if len(key) >= 2 and key[0] == key[-1] and key[0] in {"'", '"'}:
+                    key = key[1:-1].strip()
+                if key:
+                    return key
+    raise ValueError(f"Set {env_name} in {env_file} or the local environment")
 
 
 def convert_messages(messages: Any) -> list[dict]:
@@ -78,18 +96,50 @@ class AppServer:
     """Synchronous JSON-RPC transport, called under the HTTP service lock."""
 
     def __init__(
-        self, model: str, effort: str, log_dir: Path, executable: str = "codex"
+        self, model: str, effort: str, log_dir: Path, executable: str = "codex",
+        *, responses_base_url: str | None = None,
+        provider_key_env: str = "DASHSCOPE_API_KEY",
+        model_catalog: Path | None = None,
+        env_file: Path = Path(".env"),
     ):
         self.model = model
         self.effort = effort
         self.log_dir = log_dir
         self.executable = executable
+        self.responses_base_url = responses_base_url
+        self.provider_key_env = provider_key_env
+        self.env_file = env_file.resolve()
+        self.model_catalog = model_catalog.resolve() if model_catalog else None
         self.process = None
         self.messages = Queue()
         self.sequence = 0
         self.thread_id = None
         self.turn_id = None
         self.stderr = None
+
+    def _startup_args(self, executable):
+        args = [executable, "-a", "never"]
+        if self.responses_base_url is None:
+            args.extend(["-c", "model_providers.openai.supports_websockets=false"])
+        else:
+            provider = "model_providers.voloagent_api"
+            overrides = {
+                "model": self.model,
+                "model_provider": "voloagent_api",
+                "web_search": "disabled",
+                "features.shell_tool": False,
+                f"{provider}.name": "VoLoAgent Responses API",
+                f"{provider}.base_url": self.responses_base_url,
+                f"{provider}.env_key": self.provider_key_env,
+                f"{provider}.wire_api": "responses",
+                f"{provider}.requires_openai_auth": False,
+                f"{provider}.supports_websockets": False,
+            }
+            if self.model_catalog is not None:
+                overrides["model_catalog_json"] = str(self.model_catalog)
+            for key, value in overrides.items():
+                args.extend(["-c", f"{key}={json.dumps(value)}"])
+        return [*args, "app-server"]
 
     def _send(self, method, params, request_id=None):
         message = {"method": method, "params": params}
@@ -144,19 +194,17 @@ class AppServer:
         executable = shutil.which(self.executable)
         if executable is None:
             raise RuntimeError("Codex executable was not found")
+        child_env = None
+        if self.responses_base_url is not None:
+            child_env = os.environ.copy()
+            child_env[self.provider_key_env] = _provider_key(self.provider_key_env, self.env_file)
         self.messages = Queue()
         self.stderr = (self.log_dir / "app-server.stderr.log").open(
             "a", encoding="utf-8"
         )
         self.process = subprocess.Popen(
-            [
-                executable,
-                "-a",
-                "never",
-                "-c",
-                "model_providers.openai.supports_websockets=false",
-                "app-server",
-            ],
+            self._startup_args(executable),
+            env=child_env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
@@ -181,14 +229,17 @@ class AppServer:
         """Record account counters without guessing per-turn credit charges."""
         started = time.monotonic()
         snapshot = {"timestamp": time.time(), "scope": "account"}
-        try:
-            snapshot["rate_limits"] = self._request(
-                "account/rateLimits/read", {},
-                min(deadline, time.monotonic() + 5), audit,
-            )
-            snapshot["status"] = "available"
-        except (RuntimeError, TimeoutError) as error:
-            snapshot.update(status="unavailable", error=str(error))
+        if self.responses_base_url is not None:
+            snapshot.update(status="not_applicable", scope="external_provider")
+        else:
+            try:
+                snapshot["rate_limits"] = self._request(
+                    "account/rateLimits/read", {},
+                    min(deadline, time.monotonic() + 5), audit,
+                )
+                snapshot["status"] = "available"
+            except (RuntimeError, TimeoutError) as error:
+                snapshot.update(status="unavailable", error=str(error))
         snapshot["latency_s"] = time.monotonic() - started
         (request_dir / f"quota-{phase}.json").write_text(
             json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -219,6 +270,11 @@ class AppServer:
                 )
                 self.thread_id = started["thread"]["id"]
                 model = started.get("model", self.model)
+                provider = started.get("modelProvider") or started["thread"].get("modelProvider")
+                if self.responses_base_url is not None and (
+                    provider != "voloagent_api" or model != self.model
+                ):
+                    raise RuntimeError("Codex selected a different model or API provider")
                 turn = self._request(
                     "turn/start",
                     {
@@ -272,6 +328,7 @@ class AppServer:
                     "thread_id": self.thread_id,
                     "turn_id": self.turn_id,
                     "model": model,
+                    "model_provider": provider,
                     "usage": usage,
                     "turn_latency_s": turn_latency,
                     "quota_before": quota_before,
@@ -309,11 +366,17 @@ class AppServer:
 
 
 def build_app(
-    *, model="gpt-6.1-sol", effort="low", log_dir: Path, timeout=300, runner=None
+    *, model="gpt-6.1-sol", effort="low", log_dir: Path, timeout=300, runner=None,
+    responses_base_url: str | None = None, provider_key_env="DASHSCOPE_API_KEY",
+    model_catalog: Path | None = None,
+    env_file: Path = Path(".env"),
 ):
     log_dir = Path(log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    server = runner or AppServer(model, effort, log_dir)
+    server = runner or AppServer(
+        model, effort, log_dir, responses_base_url=responses_base_url,
+        provider_key_env=provider_key_env, model_catalog=model_catalog, env_file=env_file,
+    )
     lock = asyncio.Lock()
     app = web.Application(client_max_size=32 * 1024**2)
 
@@ -323,6 +386,7 @@ def build_app(
                 "status": "ok",
                 "model": model,
                 "transport": "codex-app-server",
+                "inference_backend": "responses_api" if responses_base_url else "codex_account",
                 "busy": lock.locked(),
             }
         )
@@ -421,15 +485,42 @@ def main():
     parser.add_argument("--effort", choices=("low", "medium", "high"), default="low")
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument("--responses-base-url", help="Custom provider base URL, excluding /responses")
+    parser.add_argument("--provider-key-env", default="DASHSCOPE_API_KEY",
+                        help="Name of the provider API key setting")
+    parser.add_argument("--env-file", type=Path, default=Path(".env"),
+                        help="Local credential file (default: .env in the launch directory)")
+    parser.add_argument("--model-catalog", type=Path,
+                        help="Optional Codex model catalog JSON for the custom provider")
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be positive and finite")
+    if args.responses_base_url:
+        url = urlsplit(args.responses_base_url)
+        loopback = url.hostname in {"localhost", "127.0.0.1", "::1"}
+        if (
+            not url.hostname or (url.scheme != "https" and not (url.scheme == "http" and loopback))
+            or url.username is not None or url.password is not None or url.query or url.fragment
+            or url.path.rstrip("/").endswith(("/responses", "/chat/completions"))
+        ):
+            parser.error("use the provider's HTTPS base URL without credentials or an API operation suffix")
+        try:
+            _provider_key(args.provider_key_env, args.env_file)
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+        args.responses_base_url = args.responses_base_url.rstrip("/")
+    if args.model_catalog and (not args.responses_base_url or not args.model_catalog.is_file()):
+        parser.error("--model-catalog requires a custom Responses base URL and an existing JSON file")
     web.run_app(
         build_app(
             model=args.model,
             effort=args.effort,
             log_dir=args.log_dir,
             timeout=args.timeout,
+            responses_base_url=args.responses_base_url,
+            provider_key_env=args.provider_key_env,
+            model_catalog=args.model_catalog,
+            env_file=args.env_file,
         ),
         host="127.0.0.1",
         port=args.port,

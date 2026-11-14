@@ -158,6 +158,10 @@ def main():
 
     # --- Subgoal mode options ---
     parser.add_argument(
+        "--task-planner", choices=["flat", "logiv"], default="flat",
+        help="Use the original subgoal list or a REMM-backed LOGIV task graph.",
+    )
+    parser.add_argument(
         "--memory-mode", choices=["off", "current", "episodic"], default="off",
         help="Independent REMM evidence memory. 'current' uses current-frame "
              "evidence; 'episodic' also tracks temporal evidence. Default: off.",
@@ -633,6 +637,13 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.task_planner == "logiv" and (
+        args.memory_mode != "episodic" or args.memory_gate != "enforce"
+        or args.hitl or args.subgoal_initial_mode != "direct"
+    ):
+        parser.error("--task-planner logiv requires --memory-mode episodic, "
+                     "--memory-gate enforce and autonomous direct planning")
 
     if args.memory_max_reobservations < 0:
         parser.error("--memory-max-reobservations must be nonnegative")
@@ -1138,6 +1149,10 @@ def _build_strategy(args):
             from vlm_orchestrator.strategies.remm_subgoal import RemmSubgoalStrategy
 
             strategy_type = RemmSubgoalStrategy
+            if getattr(args, "task_planner", "flat") == "logiv":
+                from vlm_orchestrator.strategies.logiv_subgoal import LogivSubgoalStrategy
+
+                strategy_type = LogivSubgoalStrategy
             memory_options["memory_config"] = RemmConfig(
                 mode=memory_mode,
                 gate=getattr(args, "memory_gate", "shadow"),

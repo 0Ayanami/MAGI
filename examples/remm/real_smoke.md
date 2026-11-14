@@ -33,10 +33,39 @@ specified log directory. Caller token limits are recorded as unapplied because
 this App Server path controls its own generation budget. Model or transport
 errors return HTTP 503 and remain visible in the experiment logs.
 
+### Qwen inference through the same App Server
+
+For the Qwen experiment, add `DASHSCOPE_API_KEY=your_key` to the local,
+Git-ignored `.env` file and start the bridge from the repository root.
+Use `--env-file` for a different local path. An existing environment variable
+takes precedence. The bridge reads only the configured API key from this file.
+Use the Responses endpoint for your Bailian workspace.
+For example, with a Beijing workspace and `qwen3.8-max` enabled:
+
+```powershell
+.\.venv\Scripts\python.exe -m vlm_orchestrator.utils.codex_vlm_server `
+  --port 18080 --model qwen3.8-max --effort low `
+  --responses-base-url 'https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' `
+  --log-dir results/remm_qwen/local
+```
+
+Use `VLM_MODEL=qwen3.8-max` and the SSH-forwarded bridge URL as `VLM_BASE_URL`.
+The bridge starts a custom provider in its App Server subprocess. App Server
+handles the turn and calls the provider over HTTP Responses SSE. See the
+[Bailian Responses reference](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)
+and [Codex gateway requirements](https://learn.chatgpt.com/docs/enterprise/gateway-compatibility).
+If your Codex version needs model metadata for the selected ID, pass a
+compatible Codex model catalog using `--model-catalog`.
+
+For this backend, verify an image-bearing plan and monitor request, including
+the actual model/provider, valid JSON, and reported token usage. Use Bailian
+usage and billing for API spend. The bridge marks ChatGPT quota snapshots as
+not applicable to external inference.
+
 ## Required accounting for the next experiment
 
-Fix the Codex model to `gpt-6.1-sol` and reasoning effort to `low` using the
-bridge command above. Record the actual returned model and requested effort.
+For the ChatGPT-backed baseline, use `gpt-6.1-sol` and reasoning effort `low`.
+Record the actual returned model and requested effort for each backend.
 Keep each experiment in a separate log directory, including warmup requests.
 
 For every plan/monitor/replan request retain `result.json`, exact request,

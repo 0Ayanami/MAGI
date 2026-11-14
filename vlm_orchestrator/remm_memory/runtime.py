@@ -95,6 +95,7 @@ class MemoryRuntime:
         )
         self.objects = []
         self.contracts = {}
+        self.watched_predicates = frozenset()
         self.plan_version = 0
         self.plan_error = None
         self.step = -1
@@ -273,7 +274,8 @@ class MemoryRuntime:
                     evidence_ids=(event.id,),
                 )
             results = {}
-            predicates = {p for group in self.contracts.values() for p in group}
+            predicates = set(self.watched_predicates)
+            predicates.update(p for group in self.contracts.values() for p in group)
             if self.config.mode == "episodic":
                 predicates.update(
                     p for group in self._completed_contracts.values() for p in group
@@ -405,6 +407,36 @@ class MemoryRuntime:
             evidence_ids=(event.id,),
         )
         self._completed_contracts[self._goal_ids[index]] = self.contracts[index]
+        return completed
+
+    def condition(self, predicate, step):
+        """Return current online verification and its evidence binding."""
+        row = None
+        if step == self.step and not self.observation_error:
+            row = self.results.get(predicate)
+        if row is None:
+            return {
+                "truth": "UNKNOWN",
+                "reason": self.observation_error or "no current verification",
+                "evidence_ids": [],
+                "assertion_id": None,
+            }
+        record = self.store.current(predicate)
+        assertion_id = record.id if record and record.truth.value == row["truth"] else None
+        return {**row, "assertion_id": assertion_id}
+
+    def record_completion(self, goal_id, predicates, step):
+        """Bind an external task node to fresh, supported REMM assertions."""
+        predicates = tuple(predicates)
+        rows = [self.condition(predicate, step) for predicate in predicates]
+        if not rows or any(row["truth"] != "TRUE" or not row["assertion_id"] for row in rows):
+            raise ValueError("completion requires fresh REMM assertions")
+        completed = self.store.complete_goal(
+            goal_id,
+            predicates,
+            evidence_ids=tuple(dict.fromkeys(e for row in rows for e in row["evidence_ids"])),
+        )
+        self._completed_contracts[goal_id] = predicates
         return completed
 
     @property

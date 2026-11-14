@@ -7,6 +7,8 @@ cd -- "$root"
 stage="$root/data/stage1"
 gate=${MEMORY_GATE:-shadow}
 case "$gate" in shadow|enforce) ;; *) echo "MEMORY_GATE must be shadow or enforce" >&2; exit 2 ;; esac
+planner=${SMOKE_TASK_PLANNER:-flat}
+case "$planner:$gate" in flat:*|logiv:enforce) ;; *) echo "LOGIV requires MEMORY_GATE=enforce" >&2; exit 2 ;; esac
 : "${VLM_BASE_URL:?Set the SSH-forwarded Codex bridge URL}"
 : "${VLM_MODEL:?Set the Codex model identifier}"
 export VLM_API_KEY="${VLM_API_KEY:-local-codex-session}"
@@ -31,6 +33,7 @@ printf 'run=%s\n' "$run"
     printf 'branch=%s\n' "$(git branch --show-current)"
     printf 'suite=%s\ntask_filter=%s\nseed=7\ninitial_state_index=0\n' "$task_suite" "$task_filter"
     printf 'memory_mode=episodic\nmemory_gate=%s\nmemory_min_confidence=%s\n' "$gate" "$confidence"
+    printf 'task_planner=%s\n' "$planner"
     printf 'vlm_base_url=%s\nvlm_model=%s\nperception_url=%s\n' "$VLM_BASE_URL" "$VLM_MODEL" "$perception_url"
     printf 'policy_port=%s\nproxy_port=%s\nmonitor_interval=40\nterminal_observations=2\nterminal_observation_interval=40\n' "$policy_port" "$proxy_port"
     printf 'terminal_action_mode=%s\n' "$terminal_mode"
@@ -60,6 +63,7 @@ trap 'exit 143' TERM
 "$root/.venv/bin/python" -B -m vlm_orchestrator.cli \
     --host 127.0.0.1 --port "$proxy_port" --vla-host 127.0.0.1 --vla-port "$policy_port" \
     --env libero --mode subgoal --failure-monitor vlm --recovery-mode replan \
+    --task-planner "$planner" \
     --memory-mode episodic --memory-gate "$gate" --memory-perception-url "$perception_url" \
     --memory-min-confidence "$confidence" \
     --vlm-base-url "$VLM_BASE_URL" --vlm-model "$VLM_MODEL" \
