@@ -31,13 +31,16 @@ def summarize(run, calls, quota):
         decision = json.loads(result.get("text") or "{}")
         kind = (
             "repair" if "repair_nodes" in decision
-            else "plan" if "nodes" in decision
             else "monitor" if "action" in decision
+            else "replan" if "remaining" in decision or "done" in decision
+            else "plan" if "nodes" in decision or "subgoals" in decision
             else "unclassified"
         )
+        request_path = directory / "request.json"
         records.append({
             "id": directory.name, "kind": kind, "model": result.get("model"),
             "provider": result.get("model_provider"), "effort": result.get("effort"),
+            "request_recorded_at": request_path.stat().st_mtime if request_path.is_file() else None,
             "error": result.get("error"), "usage": usage,
             **{k: result.get(k) for k in (
                 "latency_s", "turn_latency_s", "queue_wait_s", "service_latency_s",
@@ -53,7 +56,23 @@ def summarize(run, calls, quota):
     graph = [event for event in events if event.get("type") == "logiv_event"]
     memory = [event for event in events if event.get("type") == "remm_snapshot"]
     observations = [o for row in memory for o in row["snapshot"]["observation_events"]]
-    episodes = [read_json(path) for path in run.rglob("eval_metadata.json")]
+    episodes = sorted(
+        (read_json(path) for path in run.rglob("eval_metadata.json")),
+        key=lambda row: (row["task_id"], row["episode_idx"]),
+    )
+    for episode in episodes:
+        end = episode["end_time"] + (episode.get("terminal_verification") or {}).get("duration_s", 0)
+        episode_calls = [
+            row for row in records if row["request_recorded_at"] is not None
+            and episode["start_time"] <= row["request_recorded_at"] <= end
+        ]
+        episode["qwen_request_ids"] = [row["id"] for row in episode_calls]
+        episode["qwen_token_totals_reported"] = {
+            field: sum(values) if (values := [
+                row["usage"][field] for row in episode_calls if row["usage"].get(field) is not None
+            ]) else None
+            for field in usage_fields
+        }
     perception = list(read_events(run.rglob("requests.jsonl")))
     return {
         "config": dict(
