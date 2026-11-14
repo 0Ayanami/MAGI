@@ -133,7 +133,10 @@ class TaskGraph:
             object_id = identifier(item.get("id"), "object ID")
             if object_id in objects:
                 raise ValueError("duplicate object ID")
-            objects[object_id] = identifier(item.get("description"), "object description")
+            description = identifier(item.get("description"), "object description")
+            if len(description.split()) > 9 or any(mark in description for mark in ",;\n"):
+                raise ValueError("object description must be a short appearance-only noun phrase")
+            objects[object_id] = description
         refs = set(objects)
         nodes = _nodes(payload.get("nodes"), objects, limit=32)
         final = _conditions(payload.get("final_conditions"), refs, required=True)

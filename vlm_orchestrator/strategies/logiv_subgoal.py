@@ -29,7 +29,10 @@ final placement. Do not introduce a separate pick node in that case.
 _PLAN_PROMPT = """
 Return one JSON object with objects (a list of {"id": ..., "description": ...}),
 nodes (in reference execution order) and final_conditions (nonempty list of
-physical conditions). Use distinctive, visually grounded descriptions. Express
+physical conditions). Use short noun phrases containing only the object's
+appearance and type, such as "silver bowl" or "white plate with a red rim".
+Never mention neighboring objects, scene locations, or actions in descriptions.
+These phrases are reused for detection after the objects move. Express
 only real dependencies, and include all terminal task requirements using the
 available predicates. Provide effects that establish downstream prerequisites.
 The plan requests verification; it never certifies observed facts.
