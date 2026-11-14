@@ -28,6 +28,14 @@ def summarize(run, calls, quota):
         path = directory / "result.json"
         result = read_json(path) if path.is_file() else {"error": "no recorded result"}
         usage = (result.get("usage") or {}).get("total") or {}
+        usage_source = "result" if usage else None
+        rpc_log = directory / "app-server-events.jsonl"
+        if not usage and rpc_log.is_file():
+            for event in read_events([rpc_log]):
+                if event.get("method") == "thread/tokenUsage/updated":
+                    usage = event.get("params", {}).get("tokenUsage", {}).get("total") or usage
+            if usage:
+                usage_source = "app_server_events"
         decision = json.loads(result.get("text") or "{}")
         kind = (
             "repair" if "repair_nodes" in decision
@@ -41,7 +49,7 @@ def summarize(run, calls, quota):
             "id": directory.name, "kind": kind, "model": result.get("model"),
             "provider": result.get("model_provider"), "effort": result.get("effort"),
             "request_recorded_at": request_path.stat().st_mtime if request_path.is_file() else None,
-            "error": result.get("error"), "usage": usage,
+            "error": result.get("error"), "usage": usage, "usage_source": usage_source,
             **{k: result.get(k) for k in (
                 "latency_s", "turn_latency_s", "queue_wait_s", "service_latency_s",
                 "thread_id", "turn_id",
