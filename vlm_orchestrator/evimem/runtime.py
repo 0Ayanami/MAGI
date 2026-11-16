@@ -1,4 +1,4 @@
-"""Episode-local REMM adaptation and experiment configuration.
+"""Episode-local EviMem adaptation and experiment configuration.
 
 Only the explicitly documented online object stream or the configured RGB-D
 grounder supplies observations. Simulator ground truth is never consumed here.
@@ -11,6 +11,8 @@ import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 
+import numpy as np
+
 from .perception import (
     GeometryVerifier,
     ObjectObservation,
@@ -22,7 +24,7 @@ from .types import Evidence, Predicate, Truth
 
 
 @dataclass(frozen=True)
-class RemmConfig:
+class EviMemConfig:
     mode: str = "episodic"
     gate: str = "shadow"
     max_reobservations: int = 3
@@ -32,12 +34,15 @@ class RemmConfig:
     stable_observations: int = 2
     max_gap_steps: int = 80
     placement_tolerance: float = 0.02
+    verification: str = "geometry"
 
     def __post_init__(self):
         if self.mode not in {"current", "episodic"}:
             raise ValueError("memory mode must be current or episodic")
         if self.gate not in {"shadow", "enforce"}:
             raise ValueError("memory gate must be shadow or enforce")
+        if self.verification not in {"geometry", "vlm"}:
+            raise ValueError("memory verification must be geometry or vlm")
         if (
             type(self.max_reobservations) is not int
             or self.max_reobservations < 0
@@ -63,7 +68,7 @@ class RemmConfig:
 class MemoryRuntime:
     """Coordinate identity references, evidence, current verification and history."""
 
-    def __init__(self, config: RemmConfig):
+    def __init__(self, config: EviMemConfig):
         self.config = config
         self.grounder = None
         if config.perception_url:
@@ -87,12 +92,14 @@ class MemoryRuntime:
 
     def reset(self, episode_id):
         self.store = MemoryStore(episode_id)
-        self.verifier = GeometryVerifier(
-            stable_observations=self.config.stable_observations,
-            min_confidence=self.config.min_confidence,
-            max_gap_steps=self.config.max_gap_steps,
-            placement_tolerance=self.config.placement_tolerance,
-        )
+        self.verifier = None
+        if self.config.verification == "geometry":
+            self.verifier = GeometryVerifier(
+                stable_observations=self.config.stable_observations,
+                min_confidence=self.config.min_confidence,
+                max_gap_steps=self.config.max_gap_steps,
+                placement_tolerance=self.config.placement_tolerance,
+            )
         self.objects = []
         self.contracts = {}
         self.watched_predicates = frozenset()
@@ -108,6 +115,9 @@ class MemoryRuntime:
         self._object_specs = {}
         self._completed_contracts = {}
         self._last_index = -1
+        self.gripper = None
+        self.last_open_step = None
+        self.reacquired_steps = {}
 
     def set_plan(self, payload, subgoals):
         """Install a plan contract, failing uncovered goals closed.
@@ -122,12 +132,13 @@ class MemoryRuntime:
         self.results = {}
         self.plan_error = None
         self._last_index = len(subgoals) - 1
-        self.verifier.reset()
+        if self.verifier is not None:
+            self.verifier.reset()
         try:
             if not isinstance(payload, dict):
                 raise ValueError("planner must return a memory object")
             objects = payload.get("objects", [])
-            goals = payload.get("goals", [])
+            goals = payload.get("goals", []) if self.verifier is not None else []
             if not isinstance(objects, list) or not isinstance(goals, list):
                 raise ValueError("objects and goals must be lists")
             specs = []
@@ -197,8 +208,10 @@ class MemoryRuntime:
             raise ValueError("out-of-order observation")
         self.step = step
 
-    def observe(self, obs, step):
+    def observe(self, obs, step, *, object_ids=None):
         self.invalidate_current(step, "observation not yet verified")
+        if self.config.verification == "vlm" and self.config.env_mode == "libero":
+            self._observe_gripper(obs, step)
         if self.config.mode == "current":
             self.store = MemoryStore(self.store.episode_id)
             self._frame_evidence = {}
@@ -207,10 +220,11 @@ class MemoryRuntime:
         verifier = deepcopy(self.verifier)
         frame_evidence = dict(self._frame_evidence)
         frame_steps = dict(self._frame_steps)
+        specs = [item for item in self.objects if object_ids is None or item["id"] in object_ids]
         try:
-            if "observation/remm_objects" in obs:
+            if "observation/evimem_objects" in obs:
                 objects = observations_from_payload(
-                    obs["observation/remm_objects"],
+                    obs["observation/evimem_objects"],
                     frame_id=frame_id,
                 )
             elif self.grounder is not None:
@@ -230,10 +244,10 @@ class MemoryRuntime:
                     "observation/depth_for_grasp",
                 )
                 online = {key: obs[key] for key in allowed if key in obs}
-                objects = self.grounder.observe(online, self.objects, step)
+                objects = self.grounder.observe(online, specs, step)
             else:
                 objects = {}
-            declared = {item["id"]: item["description"] for item in self.objects}
+            declared = {item["id"]: item["description"] for item in specs}
             objects = {key: value for key, value in objects.items() if key in declared}
             for object_id in declared:
                 objects.setdefault(
@@ -253,13 +267,16 @@ class MemoryRuntime:
                     objects[object_id] = item
                 else:
                     frame_steps[frame_key] = step
+                payload = asdict(item)
+                if verifier is None:
+                    payload.pop("holding")
                 event = Evidence(
                     id=f"plan{self.plan_version}:step{step}:object:{object_id}",
                     step=step,
                     source=item.source,
                     object_ids=(object_id,),
                     frame_id=item.frame_id,
-                    payload=asdict(item),
+                    payload=payload,
                 )
                 store.add_evidence(event)
                 self._new_events.append(event.to_dict())
@@ -274,12 +291,14 @@ class MemoryRuntime:
                     evidence_ids=(event.id,),
                 )
             results = {}
-            predicates = set(self.watched_predicates)
-            predicates.update(p for group in self.contracts.values() for p in group)
-            if self.config.mode == "episodic":
-                predicates.update(
-                    p for group in self._completed_contracts.values() for p in group
-                )
+            predicates = set()
+            if verifier is not None:
+                predicates.update(self.watched_predicates)
+                predicates.update(p for group in self.contracts.values() for p in group)
+                if self.config.mode == "episodic":
+                    predicates.update(
+                        p for group in self._completed_contracts.values() for p in group
+                    )
             for predicate in sorted(predicates, key=lambda p: (p.name, p.args)):
                 result = verifier.evaluate(
                     predicate,
@@ -329,6 +348,12 @@ class MemoryRuntime:
                     self._new_events.append(event.to_dict())
                     store.complete_goal(goal, conditions, evidence_ids=(event.id,))
             self.results = results
+            if self.config.verification == "vlm" and self.config.mode == "episodic":
+                for object_id, record in store.objects.items():
+                    previous = self.store.objects.get(object_id)
+                    if (previous and not previous.visible and record.trusted_step == step
+                            and previous.observed_step < step):
+                        self.reacquired_steps[object_id] = step
             self.store = store
             self.verifier = verifier
             self._frame_evidence = frame_evidence
@@ -341,6 +366,22 @@ class MemoryRuntime:
             if isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
                 raise ValueError(str(error)) from error
             raise
+
+    def _observe_gripper(self, obs, step):
+        try:
+            values = np.asarray(obs.get("observation/gripper_position"), dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            return
+        if values.size != 1 or not 0 <= values[0] <= 1:
+            return
+        if self.gripper and self.gripper["step"] >= step:
+            return
+        value = float(values[0])
+        previous = self.gripper["state"] if self.gripper else None
+        status = "open" if value <= 0.2 else "closed" if value >= 0.5 else previous
+        if status == "open" and previous == "closed":
+            self.last_open_step = step
+        self.gripper = {"ref": f"gripper:{step}", "step": step, "closed_fraction": value, "state": status}
 
     def check_completion(self, index, step):
         predicates = self.contracts.get(index)
@@ -426,11 +467,11 @@ class MemoryRuntime:
         return {**row, "assertion_id": assertion_id}
 
     def record_completion(self, goal_id, predicates, step):
-        """Bind an external task node to fresh, supported REMM assertions."""
+        """Bind an external task node to fresh, supported EviMem assertions."""
         predicates = tuple(predicates)
         rows = [self.condition(predicate, step) for predicate in predicates]
         if not rows or any(row["truth"] != "TRUE" or not row["assertion_id"] for row in rows):
-            raise ValueError("completion requires fresh REMM assertions")
+            raise ValueError("completion requires fresh EviMem assertions")
         completed = self.store.complete_goal(
             goal_id,
             predicates,
@@ -461,6 +502,8 @@ class MemoryRuntime:
         }
 
     def context(self):
+        if self.config.verification == "vlm":
+            return self._object_context()
         snapshot = self.snapshot()
         snapshot.pop("observation_events")
         if self.config.mode == "episodic":
@@ -490,3 +533,51 @@ class MemoryRuntime:
                 "included_revisions": len(revisions),
             }
         return json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
+
+    def _object_context(self):
+        return json.dumps(self.evidence(), ensure_ascii=False, allow_nan=False)
+
+    def evidence(self, object_ids=None, *, since_step=None):
+        """Select timestamped, single-object samples for the active node."""
+        records = self.store.objects
+        specs = [spec for spec in self.objects if object_ids is None or spec["id"] in object_ids]
+        samples = {spec["id"]: [] for spec in specs}
+        for event in self.store.events:
+            object_id, = event.object_ids
+            payload = event.payload
+            if (object_id in samples and payload["visible"]
+                    and payload["position"] is not None
+                    and payload["confidence"] >= self.config.min_confidence):
+                samples[object_id].append({
+                    "ref": event.id,
+                    "step": event.step, "frame_id": event.frame_id,
+                    "position": payload["position"], "bounds": payload["bounds"],
+                    "confidence": payload["confidence"], "source": event.source,
+                })
+        objects = []
+        for spec in specs:
+            record = records.get(spec["id"])
+            trusted_step = record.trusted_step if record else None
+            history = samples[spec["id"]]
+            selected = history[-4:]
+            if since_step is not None and history:
+                start = next((row for row in history if row["step"] >= since_step), history[-1])
+                after_open = next((row for row in history if self.last_open_step is not None
+                                   and row["step"] >= self.last_open_step >= since_step), None)
+                selected = [row for row in history if row in (start, after_open, *history[-2:])]
+            objects.append({
+                **spec,
+                "visible": bool(record and record.visible and not self.observation_error
+                                and record.observed_step == self.step),
+                "last_observed_step": record.observed_step if record else None,
+                "initial_position": record.initial_position if record else None,
+                "last_trusted_position": record.last_trusted_position if record else None,
+                "last_trusted_step": trusted_step,
+                "last_trusted_age_steps": self.step - trusted_step if trusted_step is not None else None,
+                "trusted_samples": selected,
+            })
+        return {
+            "coordinate_frame": "world", "units": "m", "current_step": self.step,
+            "observation_error": self.observation_error, "objects": objects,
+            "node_start_step": since_step, "gripper": self.gripper, "last_open_step": self.last_open_step,
+        }

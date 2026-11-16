@@ -3391,7 +3391,13 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
     # ------------------------------------------------------------------
 
     def _advance_subgoal(self, obs: dict, state: SessionState) -> None:
-        """Move to the next subgoal.  Does NOT log — caller logs."""
+        """Move to the next subgoal and record the transition for evaluation."""
+        state.log({
+            "type": "subgoal_advanced",
+            "step": state.episode_step,
+            "subgoal_idx": state.current_subgoal_idx,
+            "instruction": state.subgoals[state.current_subgoal_idx],
+        })
         state.current_subgoal_idx += 1
         new_sg = state.subgoals[state.current_subgoal_idx]
         state.rewritten_instruction = new_sg

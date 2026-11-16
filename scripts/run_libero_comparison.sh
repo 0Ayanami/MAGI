@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Run LIBERO through the selected Codex/VLA strategy after services are ready.
+# Run one arm of the fixed LIBERO comparison after services are ready.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd -- "$root"
 stage="$root/data/stage1"
-gate=${MEMORY_GATE:-shadow}
-case "$gate" in shadow|enforce) ;; *) echo "MEMORY_GATE must be shadow or enforce" >&2; exit 2 ;; esac
-planner=${SMOKE_TASK_PLANNER:-flat}
-memory=${SMOKE_MEMORY_MODE:-episodic}
-case "$planner:$memory:$gate" in flat:off:*|flat:episodic:*|logiv:episodic:enforce) ;; *) echo "Invalid planner and memory combination" >&2; exit 2 ;; esac
+arm=${1:-}
+case "$arm" in
+    baseline) planner=flat memory=off gate=shadow ;;
+    tasksys) planner=tasksys memory=episodic gate=enforce ;;
+    *) echo "Usage: bash scripts/run_libero_comparison.sh baseline|tasksys" >&2; exit 2 ;;
+esac
+verification=vlm
 : "${VLM_BASE_URL:?Set the SSH-forwarded Codex bridge URL}"
 : "${VLM_MODEL:?Set the Codex model identifier}"
 export VLM_API_KEY="${VLM_API_KEY:-local-codex-session}"
@@ -17,37 +19,43 @@ export TMPDIR="$stage/tmp" LIBERO_CONFIG_PATH="$stage/config/libero"
 export XDG_CACHE_HOME="$stage/cache" MPLCONFIGDIR="$stage/cache/matplotlib"
 export NUMBA_CACHE_DIR="$stage/cache/numba" CUDA_CACHE_PATH="$stage/cache/cuda"
 export HF_HOME="$stage/cache/huggingface" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-mkdir -p "$root/results/libero"
-run=$(mktemp -d "$root/results/libero/remm_codex_${gate}_XXXXXXXX")
+if [[ -n ${EXPERIMENT_BATCH_DIR:-} ]]; then
+    mkdir -p -- "$EXPERIMENT_BATCH_DIR"
+    batch=$(cd -- "$EXPERIMENT_BATCH_DIR" && pwd -P)
+    run="$batch/$arm"
+    mkdir -- "$run"
+else
+    mkdir -p "$root/results/libero"
+    run=$(mktemp -d "$root/results/libero/${arm}_XXXXXXXX")
+fi
 policy_port=${SMOKE_POLICY_PORT:-18002}
 proxy_port=${SMOKE_PROXY_PORT:-18001}
 perception_url=${MEMORY_PERCEPTION_URL:-http://127.0.0.1:18003}
-confidence=${MEMORY_MIN_CONFIDENCE:-0.8}
-task_suite=${SMOKE_TASK_SUITE:-libero_spatial}
-task_filter=${SMOKE_TASK_FILTER-from_table_center}
-seed=${SMOKE_SEED:-7}
-max_tasks=${SMOKE_MAX_TASKS:-1}
-terminal_count=${SMOKE_TERMINAL_OBSERVATIONS:-2}
-terminal_mode=${SMOKE_TERMINAL_MODE:-hold}
-case "$terminal_mode" in hold|policy) ;; *) echo "SMOKE_TERMINAL_MODE must be hold or policy" >&2; exit 2 ;; esac
+confidence=${MEMORY_MIN_CONFIDENCE:-0.4}
+task_suite=libero_goal
+task_ids=(1 2 4 6 8)
+seed=${EXPERIMENT_SEED:-7}
+terminal_count=2
+terminal_mode=policy
 
 printf 'run=%s\n' "$run"
 {
     printf 'commit=%s\n' "$(git rev-parse HEAD)"
     printf 'branch=%s\n' "$(git branch --show-current)"
-    printf 'suite=%s\ntask_filter=%s\nseed=%s\nmax_tasks=%s\ntrials_per_task=1\ninitial_state_index=0\n' "$task_suite" "$task_filter" "$seed" "$max_tasks"
-    printf 'memory_mode=%s\nmemory_gate=%s\nmemory_min_confidence=%s\n' "$memory" "$gate" "$confidence"
+    printf 'arm=%s\nsuite=%s\ntask_ids=%s\nseed=%s\ntrials_per_task=1\ninitial_state_index=0\n' "$arm" "$task_suite" "${task_ids[*]}" "$seed"
+    printf 'memory_mode=%s\nmemory_gate=%s\nmemory_min_confidence=%s\nmemory_verification=%s\n' "$memory" "$gate" "$confidence" "$verification"
     printf 'task_planner=%s\n' "$planner"
     printf 'vlm_base_url=%s\nvlm_model=%s\nperception_url=%s\n' "$VLM_BASE_URL" "$VLM_MODEL" "$perception_url"
     printf 'policy_port=%s\nproxy_port=%s\nmonitor_interval=40\nterminal_observations=%s\nterminal_observation_interval=40\n' "$policy_port" "$proxy_port" "$terminal_count"
     printf 'terminal_action_mode=%s\n' "$terminal_mode"
 } >"$run/config.txt"
+git status --short >"$run/source-status.txt"
 
 curl -fsS --max-time 5 "http://127.0.0.1:$policy_port/healthz" >/dev/null
 memory_args=(--memory-mode "$memory")
 if [[ "$memory" != off ]]; then
     curl -fsS --max-time 5 "$perception_url/healthz" >"$run/perception-health.json"
-    memory_args+=(--memory-gate "$gate" --memory-perception-url "$perception_url"
+    memory_args+=(--memory-gate "$gate" --memory-verification "$verification" --memory-perception-url "$perception_url"
                   --memory-min-confidence "$confidence")
 fi
 curl -fsS --max-time 5 "${VLM_BASE_URL%/v1}/healthz" >"$run/codex-health.json"
@@ -90,10 +98,10 @@ PYTHONPATH="$root:$stage/libero-source" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
     MUJOCO_EGL_DEVICE_ID="${SMOKE_EGL_GPU:-2}" \
     "$stage/.libero311-venv/bin/python" -B examples/libero/run_eval.py \
     --host 127.0.0.1 --port "$proxy_port" --task-suite-name "$task_suite" \
-    --task-filter "$task_filter" --max-tasks "$max_tasks" --num-trials-per-task 1 --seed "$seed" \
+    --task-ids "${task_ids[@]}" --num-trials-per-task 1 --seed "$seed" \
     --terminal-observations "$terminal_count" --terminal-observation-interval 40 \
     --terminal-action-mode "$terminal_mode" \
-    --enable-depth --enable-gt-state --log-dir "$run/eval" --video-out-path "$run/videos" \
+    --enable-depth --enable-gt-state --record-completion-audit --log-dir "$run/eval" --video-out-path "$run/videos" \
     2>&1 | tee "$run/eval.log"
 date --iso-8601=seconds >"$run/eval-end.txt"
 

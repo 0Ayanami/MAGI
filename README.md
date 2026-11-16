@@ -17,6 +17,9 @@ This repository holds the **orchestrator code**. The benchmark task pack — 126
 
 ## Quick Start: Running Experiments
 
+For the original VoLoAgent versus TaskSys and EviMem comparison, see the
+[fixed five-task LIBERO protocol](vlm_orchestrator/evimem/README.md#fixed-libero-comparison).
+
 All experiments require three services running in separate terminals. Each service uses a different conda environment.
 
 ### Prerequisites

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from vlm_orchestrator.remm_memory.perception import (
+from vlm_orchestrator.evimem.perception import (
     GeometryVerifier,
     ObjectObservation,
     RGBDGrounder,

@@ -4,7 +4,7 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError
 
-from vlm_orchestrator.remm_memory import (
+from vlm_orchestrator.evimem import (
     AssertionStatus,
     Evidence,
     MemoryStore,

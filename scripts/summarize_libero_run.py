@@ -61,8 +61,8 @@ def summarize(run, calls, quota):
         totals[field] = {"reported_sum": sum(values) if values else None, "calls_reported": len(values)}
     latencies = [r["latency_s"] for r in records if r["latency_s"] is not None]
     events = list(read_events(run.rglob("rewrites.jsonl")))
-    graph = [event for event in events if event.get("type") == "logiv_event"]
-    memory = [event for event in events if event.get("type") == "remm_snapshot"]
+    graph = [event for event in events if event.get("type") in {"tasksys_event", "logiv_event"}]
+    memory = [event for event in events if event.get("type") in {"evimem_snapshot", "remm_snapshot"}]
     observations = [o for row in memory for o in row["snapshot"]["observation_events"]]
     episodes = sorted(
         (read_json(path) for path in run.rglob("eval_metadata.json")),
@@ -102,7 +102,7 @@ def summarize(run, calls, quota):
                 item["truth"] for row in memory for item in row["snapshot"]["verification"]
             )),
         },
-        "logiv": {
+        "tasksys": {
             "counts": dict(Counter(event["event"] for event in graph)), "events": graph,
         },
         "perception": {

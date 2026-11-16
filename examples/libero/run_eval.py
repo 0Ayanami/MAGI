@@ -54,9 +54,13 @@ def main():
                        help="Hold the measured pose/gripper, or continue policy actions.")
     parser.add_argument("--enable-depth", action="store_true", default=False)
     parser.add_argument("--enable-gt-state", action="store_true", default=False)
+    parser.add_argument("--record-completion-audit", action="store_true",
+                       help="Save simulator labels for offline completion scoring.")
     parser.add_argument("--video-out-path", default="results/libero/videos")
     parser.add_argument("--log-dir", default="results/libero/logs")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--task-ids", type=int, nargs="+", default=(),
+                       help="Evaluate the specified suite-wide task IDs in suite order.")
     parser.add_argument("--task-filter", default="",
                        help="Only eval tasks containing this substring (e.g. '_language_')")
     parser.add_argument("--max-tasks", type=int, default=0,
@@ -86,9 +90,11 @@ def main():
         terminal_action_mode=cli.terminal_action_mode,
         enable_depth=cli.enable_depth,
         enable_gt_state=cli.enable_gt_state,
+        record_completion_audit=cli.record_completion_audit,
         video_out_path=cli.video_out_path,
         log_dir=cli.log_dir,
         seed=cli.seed,
+        task_ids=tuple(cli.task_ids),
         task_filter=cli.task_filter,
         max_tasks=cli.max_tasks,
     )

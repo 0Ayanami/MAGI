@@ -1,4 +1,4 @@
-"""Evidence ledger and supported-state projection inspired by REMM, section III.
+"""Evidence ledger and supported-state projection inspired by EviMem, section III.
 
 Source-specific perception gates belong to the caller. This store accepts typed
 evidence, preserves it, and withdraws derived assertions when support changes.

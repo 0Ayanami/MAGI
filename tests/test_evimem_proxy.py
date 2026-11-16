@@ -1,4 +1,4 @@
-"""Exercise the proxy entry point with CPU transports and real REMM decisions."""
+"""Exercise the proxy entry point with CPU transports and real EviMem decisions."""
 
 import json
 import logging
@@ -13,9 +13,9 @@ from vlm_orchestrator.protocols.base import (
     FrontendSession,
 )
 from vlm_orchestrator.proxy import OrchestratorProxy, ProxyConfig
-from vlm_orchestrator.remm_memory.runtime import RemmConfig
+from vlm_orchestrator.evimem.runtime import EviMemConfig
 from vlm_orchestrator.strategies.base import StrategyContext
-from vlm_orchestrator.strategies.remm_subgoal import RemmSubgoalStrategy
+from vlm_orchestrator.strategies.evimem_subgoal import EviMemSubgoalStrategy
 from vlm_orchestrator.strategies.subgoal import SubgoalConfig
 from vlm_orchestrator.strategies.subgoal_base import SubgoalBaseStrategy
 from vlm_orchestrator.utils import codec
@@ -96,7 +96,7 @@ def observation(step, **extra):
         "__step": step,
         "__episode_id": 1,
         "observation/image": np.zeros((16, 16, 3), dtype=np.uint8),
-        "observation/remm_objects": {
+        "observation/evimem_objects": {
             "coordinate_frame": "world",
             "units": "m",
             "source": "visual",
@@ -122,10 +122,10 @@ def proxy_fixture(monkeypatch, observations, *, gate="enforce", replies=None):
         return json.dumps(next(responses))
 
     monkeypatch.setattr(SubgoalBaseStrategy, "_vlm_call", model_call)
-    strategy = RemmSubgoalStrategy(
+    strategy = EviMemSubgoalStrategy(
         StrategyContext(vlm=PassthroughVLM(), image_key="observation/image"),
         SubgoalConfig(check_interval=1),
-        memory_config=RemmConfig(gate=gate, max_reobservations=0),
+        memory_config=EviMemConfig(gate=gate, max_reobservations=0),
         failure_monitor="vlm",
         recovery_mode="replan",
     )
@@ -144,11 +144,11 @@ def proxy_fixture(monkeypatch, observations, *, gate="enforce", replies=None):
     return proxy, session, frontend, backend.connection, prompts
 
 
-def test_remm_payload_is_consumed_and_stripped_before_backend_inference(monkeypatch):
+def test_evimem_payload_is_consumed_and_stripped_before_backend_inference(monkeypatch):
     obs = observation(
         0,
         **{
-            "observation/remm_debug": "private memory data",
+            "observation/evimem_debug": "private memory data",
             "__terminal_observation": True,
             "gt_state": {"objects": {"red": {"holding": True}}},
         },
@@ -162,7 +162,7 @@ def test_remm_payload_is_consumed_and_stripped_before_backend_inference(monkeypa
     assert session.metadata["model"] == "CPU-test-policy"
     assert len(backend.observations) == len(session.responses) == 1
     forwarded = backend.observations[0]
-    assert not any(key.startswith("observation/remm_") for key in forwarded)
+    assert not any(key.startswith("observation/evimem_") for key in forwarded)
     assert "gt_state" not in forwarded
     assert "__terminal_observation" not in forwarded
     assert forwarded["prompt"] == PLAN["subgoals"][0]

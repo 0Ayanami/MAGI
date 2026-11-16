@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 from vlm_orchestrator.failure_handlers.base import ACTION_NEXT
-from vlm_orchestrator.remm_memory.runtime import MemoryRuntime, RemmConfig
+from vlm_orchestrator.evimem.runtime import MemoryRuntime, EviMemConfig
 from vlm_orchestrator.vlm import parse_json
 
 from .subgoal import SubgoalStrategy
@@ -34,14 +34,30 @@ For a condition outside this vocabulary, omit its goal entry. Descriptions and
 predicates are requests for observation, and do not certify completion.
 """
 
+_OBJECT_PLAN_PROMPT = """
+Include a memory object with an objects list of {"id": ..., "description": ...}
+for task-relevant objects. Use short, appearance-only noun phrases suitable
+for visual grounding. Reuse the ID and description for the same instance
+across replans.
+"""
 
-class RemmSubgoalStrategy(SubgoalStrategy):
+_OBJECT_CONTEXT_PROMPT = """
+Use EviMem object observations alongside the current image. Positions are in
+world-frame metres and steps are simulation steps. Trusted samples are ordered
+oldest to newest. A last trusted position is historical when the object is no
+longer tracked. A missing track alone says nothing about task completion. Use
+the images and observation history to judge whether the intended effect has
+actually occurred. If the evidence is inconclusive, do not advance.
+"""
+
+
+class EviMemSubgoalStrategy(SubgoalStrategy):
     """Subgoal execution with independently configurable evidence memory."""
 
-    def __init__(self, ctx, config, *, memory_config: RemmConfig, **kwargs):
+    def __init__(self, ctx, config, *, memory_config: EviMemConfig, **kwargs):
         if kwargs.get("failure_monitor") in {"gt", "gt_hitl", "gt_vlm"}:
             raise ValueError(
-                "REMM memory requires online observations without GT monitors"
+                "EviMem memory requires online observations without GT monitors"
             )
         if memory_config.gate == "enforce" and (
             kwargs.get("failure_monitor") != "vlm"
@@ -54,18 +70,18 @@ class RemmSubgoalStrategy(SubgoalStrategy):
             )
         super().__init__(ctx, config, **kwargs)
         self.memory_config = memory_config
-        self._active_state = ContextVar("remm_session", default=None)
-        self._planning = ContextVar("remm_planning", default=False)
-        self._plan_memory = ContextVar("remm_plan_memory", default=None)
-        self._approved_index = ContextVar("remm_approved_index", default=None)
+        self._active_state = ContextVar("evimem_session", default=None)
+        self._planning = ContextVar("evimem_planning", default=False)
+        self._plan_memory = ContextVar("evimem_plan_memory", default=None)
+        self._approved_index = ContextVar("evimem_approved_index", default=None)
 
     def _runtime(self, state):
-        if not hasattr(state, "remm_memory"):
-            state.remm_memory = MemoryRuntime(self.memory_config)
-            state.remm_blocked_counts = {}
-            state.remm_repair_attempted = set()
-            state.remm_repair_failures = {}
-        return state.remm_memory
+        if not hasattr(state, "evimem"):
+            state.evimem = MemoryRuntime(self.memory_config)
+            state.evimem_blocked_counts = {}
+            state.evimem_repair_attempted = set()
+            state.evimem_repair_failures = {}
+        return state.evimem
 
     def process(self, obs, state):
         token = self._active_state.set(state)
@@ -76,7 +92,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
 
     def _is_new_episode(self, obs, state):
         current = self.ctx.get_prompt(obs)
-        last_episode = getattr(state, "remm_last_episode_id", 0)
+        last_episode = getattr(state, "evimem_last_episode_id", 0)
         prompt_changed = current not in (
             state.original_instruction,
             state.rewritten_instruction,
@@ -91,26 +107,26 @@ class RemmSubgoalStrategy(SubgoalStrategy):
                 state.episode_id = 1
             elif state.infer_count > 0 and state.episode_id == last_episode:
                 state.episode_id += 1
-            state.remm_last_episode_id = state.episode_id
+            state.evimem_last_episode_id = state.episode_id
         return is_new
 
     def _on_new_episode(self, obs, state, prompt):
         self._runtime(state).reset(state.episode_id)
-        state.remm_blocked_counts = {}
-        state.remm_repair_attempted = set()
-        state.remm_repair_failures = {}
-        state.remm_hold = False
-        state.remm_hold_reason = ""
-        state.remm_gripper_command = None
-        state.remm_hold_env = self.memory_config.env_mode
+        state.evimem_blocked_counts = {}
+        state.evimem_repair_attempted = set()
+        state.evimem_repair_failures = {}
+        state.evimem_hold = False
+        state.evimem_hold_reason = ""
+        state.evimem_gripper_command = None
+        state.evimem_hold_env = self.memory_config.env_mode
         result = super()._on_new_episode(obs, state, prompt)
         self._observe(obs, state)
         return result
 
-    def _observe(self, obs, state):
+    def _observe(self, obs, state, **kwargs):
         runtime = self._runtime(state)
         try:
-            runtime.observe(obs, state.episode_step)
+            runtime.observe(obs, state.episode_step, **kwargs)
         except ValueError as error:
             runtime.invalidate_current(
                 max(getattr(runtime, "step", 0), state.episode_step, 0),
@@ -118,7 +134,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
             )
             state.log(
                 {
-                    "type": "remm_event",
+                    "type": "evimem_event",
                     "event": "observation_rejected",
                     "step": state.episode_step,
                     "reason": str(error),
@@ -126,7 +142,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
             )
         state.log(
             {
-                "type": "remm_snapshot",
+                "type": "evimem_snapshot",
                 "step": state.episode_step,
                 "memory_mode": self.memory_config.mode,
                 "memory_gate": self.memory_config.gate,
@@ -136,31 +152,33 @@ class RemmSubgoalStrategy(SubgoalStrategy):
 
     def _on_step(self, obs, state):
         self._observe(obs, state)
+        if self.memory_config.verification == "vlm":
+            return super()._on_step(obs, state)
         runtime = self._runtime(state)
         broken = set(runtime.broken_goals)
-        unreported = broken - state.remm_repair_attempted
-        if getattr(state, "remm_hold", False) and not broken:
-            restored = state.remm_hold_reason == "completed conditions invalidated"
+        unreported = broken - state.evimem_repair_attempted
+        if getattr(state, "evimem_hold", False) and not broken:
+            restored = state.evimem_hold_reason == "completed conditions invalidated"
             verified = runtime.check_completion(
                 state.current_subgoal_idx,
                 state.episode_step,
             )["allowed"]
             if restored or verified:
-                state.remm_hold = False
-                state.remm_hold_reason = ""
+                state.evimem_hold = False
+                state.evimem_hold_reason = ""
                 state.flush_actions = True
         if unreported and self.memory_config.gate == "enforce":
-            state.remm_repair_attempted.update(unreported)
+            state.evimem_repair_attempted.update(unreported)
             if self._repair(obs, state, "completed conditions invalidated"):
                 return self.ctx.set_prompt(obs, state.rewritten_instruction), state
-        if getattr(state, "remm_hold", False):
+        if getattr(state, "evimem_hold", False):
             signature = self._repair_signature(state)
-            failures = state.remm_repair_failures.get(signature, 0)
+            failures = state.evimem_repair_failures.get(signature, 0)
             if failures < self.memory_config.max_reobservations + 1 and (
-                state.episode_step - state.remm_step_at_repair
+                state.episode_step - state.evimem_step_at_repair
                 >= self.config.check_interval
             ):
-                if self._repair(obs, state, state.remm_hold_reason):
+                if self._repair(obs, state, state.evimem_hold_reason):
                     obs = self.ctx.set_prompt(obs, state.rewritten_instruction)
             return obs, state
         return super()._on_step(obs, state)
@@ -169,9 +187,14 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         state = self._active_state.get()
         content = list(user_content)
         if state is not None:
-            content.append({"type": "text", "text": self._runtime(state).context()})
+            context = self._memory_context(state)
+            if context is not None:
+                content.append({"type": "text", "text": context})
+        object_only = self.memory_config.verification == "vlm"
+        if object_only:
+            system_prompt += "\n" + _OBJECT_CONTEXT_PROMPT
         if self._planning.get():
-            system_prompt += "\n" + _PLAN_MEMORY_PROMPT
+            system_prompt += "\n" + (_OBJECT_PLAN_PROMPT if object_only else _PLAN_MEMORY_PROMPT)
             max_tokens = max(2048, max_tokens or self.config.vlm_max_tokens)
         raw = super()._vlm_call(system_prompt, content, max_tokens=max_tokens)
         if self._planning.get():
@@ -181,6 +204,9 @@ class RemmSubgoalStrategy(SubgoalStrategy):
             except (ValueError, AttributeError):
                 self._plan_memory.set({})
         return raw
+
+    def _memory_context(self, state):
+        return self._runtime(state).context()
 
     def _decompose_and_setup(self, obs, state, instruction, image):
         stage = self._planning.set(True)
@@ -194,14 +220,14 @@ class RemmSubgoalStrategy(SubgoalStrategy):
 
     def _set_memory_plan(self, state, payload):
         self._runtime(state).set_plan(payload, state.subgoals)
-        state.remm_blocked_counts = {}
-        if getattr(state, "remm_hold", False):
+        state.evimem_blocked_counts = {}
+        if getattr(state, "evimem_hold", False):
             state.flush_actions = True
-        state.remm_hold = False
-        state.remm_hold_reason = ""
+        state.evimem_hold = False
+        state.evimem_hold_reason = ""
         state.log(
             {
-                "type": "remm_event",
+                "type": "evimem_event",
                 "event": "plan_registered",
                 "step": state.episode_step,
                 "snapshot": self._runtime(state).snapshot(),
@@ -226,12 +252,12 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         self._set_memory_plan(state, {})
 
     def _repair(self, obs, state, reason):
-        state.remm_hold = True
-        state.remm_hold_reason = reason
+        state.evimem_hold = True
+        state.evimem_hold_reason = reason
         state.flush_actions = True
         signature = self._repair_signature(state)
-        failures = state.remm_repair_failures.get(signature, 0)
-        state.remm_step_at_repair = state.episode_step
+        failures = state.evimem_repair_failures.get(signature, 0)
+        state.evimem_step_at_repair = state.episode_step
         image = self.ctx.get_vlm_image(obs)
         available = (
             image is not None
@@ -240,7 +266,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         )
         state.log(
             {
-                "type": "remm_event",
+                "type": "evimem_event",
                 "event": "repair_requested",
                 "step": state.episode_step,
                 "reason": reason,
@@ -249,7 +275,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         )
         repaired = bool(available and self._recycle(obs, state, image))
         if not repaired:
-            state.remm_repair_failures[signature] = failures + 1
+            state.evimem_repair_failures[signature] = failures + 1
         return repaired
 
     def _repair_signature(self, state):
@@ -274,7 +300,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         allowed = bool(result["allowed"])
         state.log(
             {
-                "type": "remm_event",
+                "type": "evimem_event",
                 "event": "completion_check",
                 "step": state.episode_step,
                 "subgoal_idx": index,
@@ -284,10 +310,10 @@ class RemmSubgoalStrategy(SubgoalStrategy):
         )
         if allowed:
             runtime.mark_complete(index)
-            state.remm_blocked_counts.pop(index, None)
+            state.evimem_blocked_counts.pop(index, None)
             state.log(
                 {
-                    "type": "remm_snapshot",
+                    "type": "evimem_snapshot",
                     "step": state.episode_step,
                     "memory_mode": self.memory_config.mode,
                     "memory_gate": self.memory_config.gate,
@@ -296,8 +322,8 @@ class RemmSubgoalStrategy(SubgoalStrategy):
             )
         if self.memory_config.gate == "shadow" or allowed:
             return True
-        attempts = state.remm_blocked_counts.get(index, 0) + 1
-        state.remm_blocked_counts[index] = attempts
+        attempts = state.evimem_blocked_counts.get(index, 0) + 1
+        state.evimem_blocked_counts[index] = attempts
         if attempts == self.memory_config.max_reobservations + 1:
             self._repair(obs, state, "completion evidence budget exhausted")
         return False
@@ -305,7 +331,7 @@ class RemmSubgoalStrategy(SubgoalStrategy):
     def _execute_handler_result(self, obs, state, result):
         if result.action != ACTION_NEXT:
             return super()._execute_handler_result(obs, state, result)
-        if not self._allow_completion(obs, state):
+        if self.memory_config.verification == "geometry" and not self._allow_completion(obs, state):
             return obs, state
         token = self._approved_index.set(state.current_subgoal_idx)
         try:
@@ -315,6 +341,8 @@ class RemmSubgoalStrategy(SubgoalStrategy):
 
     def _advance_subgoal(self, obs, state):
         if self._approved_index.get() != state.current_subgoal_idx:
-            if not self._allow_completion(obs, state):
+            if self.memory_config.verification == "vlm" and self._failure_handler is not None:
+                return
+            if self.memory_config.verification == "geometry" and not self._allow_completion(obs, state):
                 return
         super()._advance_subgoal(obs, state)

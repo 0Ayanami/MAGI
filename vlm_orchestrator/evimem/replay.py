@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .runtime import MemoryRuntime, RemmConfig
+from .runtime import MemoryRuntime, EviMemConfig
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
     if args.output.resolve() in {args.input.resolve(), args.plan.resolve()}:
         parser.error("output must differ from input and plan")
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
-    runtime = MemoryRuntime(RemmConfig(mode=args.mode))
+    runtime = MemoryRuntime(EviMemConfig(mode=args.mode))
     runtime.reset(plan.get("episode_id", 1))
     runtime.set_plan(plan.get("memory"), plan["subgoals"])
     if runtime.plan_error:

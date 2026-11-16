@@ -148,6 +148,12 @@ class Args:
     derived from the filename."""
 
     # ── Plus / large-benchmark task filtering ──
+    task_ids: tuple[int, ...] = ()
+    """Exact suite-wide task IDs, in suite order. Empty selects all tasks."""
+
+    record_completion_audit: bool = False
+    """Save simulator labels beside each episode for offline completion scoring."""
+
     task_filter: str = ""
     """Only evaluate tasks whose name contains this substring.
     E.g. '_language_' for LIBERO-Plus language perturbation.
@@ -523,6 +529,11 @@ def eval_libero(args: Args) -> None:
 
     # Build task list (with optional filtering for LIBERO-Plus)
     task_ids = list(range(num_tasks))
+    if args.task_ids:
+        selected = set(args.task_ids)
+        if len(selected) != len(args.task_ids) or not selected <= set(task_ids):
+            raise ValueError("task_ids must be unique IDs in the selected LIBERO suite")
+        task_ids = [task_id for task_id in task_ids if task_id in selected]
     if args.task_filter:
         # Support "INCLUDE!EXCLUDE" syntax: e.g. "_table_!from_table_center"
         parts = args.task_filter.split("!")
@@ -621,7 +632,7 @@ def eval_libero(args: Args) -> None:
 
         # Optional: GT state exporter for GT failure detection
         gt_exporter = None
-        if args.enable_gt_state:
+        if args.enable_gt_state or args.record_completion_audit:
             try:
                 from vlm_orchestrator.aux_benchmarks.libero_gt import (
                     LiberoGTStateExporter,
@@ -696,6 +707,11 @@ def eval_libero(args: Args) -> None:
                 "orchestrator_failures": [],
                 "episode_log_dir": None,
             }
+            completion_audit = []
+
+            def record_scoring_frame(wire, step, phase):
+                if args.record_completion_audit:
+                    completion_audit.append({"step": step, "phase": phase, "gt_state": wire.get("gt_state")})
 
             t = 0
             done = False
@@ -742,6 +758,7 @@ def eval_libero(args: Args) -> None:
                                 logger.warning(
                                     f"  GT state export failed: {e}"
                                 )
+                    record_scoring_frame(wire_obs, t, "rollout")
 
                     # Capture per-step frames.  Annotated writer needs
                     # the response, so we buffer until first proxy
@@ -985,6 +1002,7 @@ def eval_libero(args: Args) -> None:
                     return wire
 
                 def record_terminal_frame(wire, step, response):
+                    record_scoring_frame(wire, step, "terminal")
                     raw = wire["observation/image"]
                     if raw_writer is not None:
                         raw_writer.add_frame(raw)
@@ -1040,6 +1058,10 @@ def eval_libero(args: Args) -> None:
                     ep_dir.mkdir(parents=True, exist_ok=True)
                     with open(ep_dir / "eval_metadata.json", "w") as f:
                         json.dump(episode_metadata, f, indent=2, default=str)
+                    if args.record_completion_audit:
+                        with (ep_dir / "completion_audit.jsonl").open("w", encoding="utf-8") as stream:
+                            for row in completion_audit:
+                                stream.write(json.dumps(row) + "\n")
                 except Exception as e:
                     logger.debug(f"  eval_metadata save failed: {e}")
 

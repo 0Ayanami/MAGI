@@ -1,4 +1,4 @@
-"""Independent REMM-inspired episode memory for controlled comparisons."""
+"""Independent EviMem-inspired episode memory for controlled comparisons."""
 
 from .store import MemoryStore
 from .types import Assertion, AssertionStatus, Evidence, ObjectRecord, Predicate, Truth

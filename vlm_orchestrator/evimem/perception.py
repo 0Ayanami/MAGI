@@ -1,4 +1,4 @@
-"""CPU grounding and conservative relation checks for REMM memory.
+"""CPU grounding and conservative relation checks for EviMem memory.
 
 Positions and bounds use metres in a common world frame with +Z up.  Online
 inputs come from visual detections and proprioception.  Simulation GT and GT
@@ -77,7 +77,7 @@ class ObjectObservation:
 def observations_from_payload(
     payload, *, frame_id: str
 ) -> dict[str, ObjectObservation]:
-    """Decode an explicit non-GT ``observation/remm_objects`` payload.
+    """Decode an explicit non-GT ``observation/evimem_objects`` payload.
 
     A payload may contain ``objects`` plus shared ``coordinate_frame=world``
     and ``units=m`` fields, or be a list with those fields in each entry.

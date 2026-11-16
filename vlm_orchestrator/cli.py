@@ -158,17 +158,21 @@ def main():
 
     # --- Subgoal mode options ---
     parser.add_argument(
-        "--task-planner", choices=["flat", "logiv"], default="flat",
-        help="Use the original subgoal list or a REMM-backed LOGIV task graph.",
+        "--task-planner", choices=["flat", "tasksys"], default="flat",
+        help="Use the original subgoal list or a EviMem-backed TaskSys task graph.",
     )
     parser.add_argument(
         "--memory-mode", choices=["off", "current", "episodic"], default="off",
-        help="Independent REMM evidence memory. 'current' uses current-frame "
+        help="Independent EviMem evidence memory. 'current' uses current-frame "
              "evidence; 'episodic' also tracks temporal evidence. Default: off.",
     )
     parser.add_argument(
+        "--memory-verification", choices=["vlm", "geometry"], default="vlm",
+        help="Use object observations with VLM decisions, or reproduce geometric EviMem checks.",
+    )
+    parser.add_argument(
         "--memory-gate", choices=["shadow", "enforce"], default="shadow",
-        help="Log proposed completion checks or enforce them before advancing.",
+        help="Geometry: log or enforce completion checks. TaskSys requires enforce.",
     )
     parser.add_argument(
         "--memory-max-reobservations", type=int, default=3,
@@ -180,7 +184,7 @@ def main():
     )
     parser.add_argument(
         "--memory-min-confidence", type=float, default=0.8,
-        help="Minimum visual observation confidence for REMM verification.",
+        help="Minimum visual observation confidence for EviMem verification.",
     )
     parser.add_argument(
         "--subgoal-check-mode",
@@ -638,12 +642,13 @@ def main():
 
     args = parser.parse_args()
 
-    if args.task_planner == "logiv" and (
+    if args.task_planner == "tasksys" and (
         args.memory_mode != "episodic" or args.memory_gate != "enforce"
+        or args.memory_verification != "vlm"
         or args.hitl or args.subgoal_initial_mode != "direct"
     ):
-        parser.error("--task-planner logiv requires --memory-mode episodic, "
-                     "--memory-gate enforce and autonomous direct planning")
+        parser.error("--task-planner tasksys requires --memory-mode episodic, "
+                     "--memory-gate enforce, --memory-verification vlm and autonomous direct planning")
 
     if args.memory_max_reobservations < 0:
         parser.error("--memory-max-reobservations must be nonnegative")
@@ -653,7 +658,7 @@ def main():
         if args.mode != "subgoal":
             parser.error("--memory-mode requires --mode subgoal")
         if args.failure_monitor in {"gt", "gt_hitl", "gt_vlm"}:
-            parser.error("REMM memory uses online evidence and cannot use GT failure monitors")
+            parser.error("EviMem memory uses online evidence and cannot use GT failure monitors")
         if args.memory_gate == "enforce" and (
             args.failure_monitor != "vlm" or args.subgoal_check_mode != "vlm"
             or args.env != "libero"
@@ -1145,21 +1150,22 @@ def _build_strategy(args):
         memory_options = {}
         memory_mode = getattr(args, "memory_mode", "off")
         if memory_mode != "off":
-            from vlm_orchestrator.remm_memory.runtime import RemmConfig
-            from vlm_orchestrator.strategies.remm_subgoal import RemmSubgoalStrategy
+            from vlm_orchestrator.evimem.runtime import EviMemConfig
+            from vlm_orchestrator.strategies.evimem_subgoal import EviMemSubgoalStrategy
 
-            strategy_type = RemmSubgoalStrategy
-            if getattr(args, "task_planner", "flat") == "logiv":
-                from vlm_orchestrator.strategies.logiv_subgoal import LogivSubgoalStrategy
+            strategy_type = EviMemSubgoalStrategy
+            if getattr(args, "task_planner", "flat") == "tasksys":
+                from vlm_orchestrator.strategies.tasksys_subgoal import TaskSysSubgoalStrategy
 
-                strategy_type = LogivSubgoalStrategy
-            memory_options["memory_config"] = RemmConfig(
+                strategy_type = TaskSysSubgoalStrategy
+            memory_options["memory_config"] = EviMemConfig(
                 mode=memory_mode,
                 gate=getattr(args, "memory_gate", "shadow"),
                 max_reobservations=getattr(args, "memory_max_reobservations", 3),
                 perception_url=getattr(args, "memory_perception_url", None),
                 env_mode=getattr(args, "env", "robolab"),
                 min_confidence=getattr(args, "memory_min_confidence", 0.8),
+                verification=getattr(args, "memory_verification", "vlm"),
             )
 
         return strategy_type(

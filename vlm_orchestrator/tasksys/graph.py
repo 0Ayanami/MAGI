@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from vlm_orchestrator.remm_memory.types import Predicate, identifier, identifiers
+from vlm_orchestrator.evimem.types import Predicate, identifier, identifiers
 
 SKILLS = {
     "pick": ("holding", "Pick up {0}."),

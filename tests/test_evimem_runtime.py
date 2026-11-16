@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from vlm_orchestrator.remm_memory.runtime import MemoryRuntime, RemmConfig
-from vlm_orchestrator.remm_memory.store import MemoryStore
-from vlm_orchestrator.remm_memory.types import Predicate, Truth
+from vlm_orchestrator.evimem.runtime import MemoryRuntime, EviMemConfig
+from vlm_orchestrator.evimem.store import MemoryStore
+from vlm_orchestrator.evimem.types import Predicate, Truth
 
 PLAN = {
     "objects": [
@@ -26,7 +26,7 @@ PLAN = {
 
 
 def runtime(mode="episodic"):
-    memory = MemoryRuntime(RemmConfig(mode=mode))
+    memory = MemoryRuntime(EviMemConfig(mode=mode))
     memory.reset(1)
     memory.set_plan(deepcopy(PLAN), ["stack red", "pick green"])
     return memory
@@ -35,7 +35,7 @@ def runtime(mode="episodic"):
 def observation(step, *, held=False, moved=False):
     x = 0.5 if moved else 0.0
     return {
-        "observation/remm_objects": {
+        "observation/evimem_objects": {
             "coordinate_frame": "world",
             "units": "m",
             "source": "rgbd",
@@ -238,7 +238,7 @@ def test_cpu_replay_command_exports_evidence_and_revocation(tmp_path):
             sys.executable,
             "-B",
             "-m",
-            "vlm_orchestrator.remm_memory.replay",
+            "vlm_orchestrator.evimem.replay",
             "--plan",
             str(plan),
             "--input",

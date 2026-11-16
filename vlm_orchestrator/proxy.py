@@ -644,7 +644,7 @@ class OrchestratorProxy:
                 #   - observation/depth_*, observation/camera_*:
                 #     grasp tool inputs (proxy-only)
                 _STRIP_PREFIXES = (
-                    "observation/remm_",
+                    "observation/evimem_",
                     "observation/depth_",
                     "observation/camera_",
                     "gt_seg/",
@@ -658,7 +658,7 @@ class OrchestratorProxy:
                         and not any(k.startswith(p) for p in _STRIP_PREFIXES)
                     )
                 }
-                if hasattr(state, "remm_memory"):
+                if hasattr(state, "evimem"):
                     gripper = np.asarray(
                         obs.get("observation/gripper_position", []), dtype=float,
                     ).reshape(-1)
@@ -666,18 +666,18 @@ class OrchestratorProxy:
                         gripper.size == 1 and np.isfinite(gripper[0])
                         and 0 <= gripper[0] <= 1
                     ):
-                        state.remm_gripper_command = 1.0 if gripper[0] > 0.5 else -1.0
+                        state.evimem_gripper_command = 1.0 if gripper[0] > 0.5 else -1.0
 
                 # ---- grasp_with_tool: bypass VLA ----
                 # When a planned grasp is active, generate actions
                 # locally instead of forwarding to the VLA server.
-                if getattr(state, "remm_hold", False):
-                    # Enforced REMM currently supports LIBERO OSC_POSE actions.
+                if getattr(state, "evimem_hold", False):
+                    # Enforced EviMem currently supports LIBERO OSC_POSE actions.
                     # Preserve the measured gripper command while requesting
                     # zero end-effector displacement at the next chunk boundary.
-                    command = getattr(state, "remm_gripper_command", None)
+                    command = getattr(state, "evimem_gripper_command", None)
                     if command is None:
-                        raise ValueError("REMM hold requires a valid normalized gripper observation")
+                        raise ValueError("EviMem hold requires a valid normalized gripper observation")
                     response = {"actions": np.zeros((5, 7), dtype=np.float32)}
                     response["actions"][:, -1] = command
                     response["orchestrator_memory_hold"] = True

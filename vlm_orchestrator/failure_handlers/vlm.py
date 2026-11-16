@@ -489,6 +489,7 @@ class VLMFailureHandler(FailureHandler):
             "vlm_latency_s": round(elapsed, 2),
             "vlm_raw": raw[:500],
             "step_count": state.infer_count,
+            "sim_step": state.episode_step,
         })
 
         # Return None for in_progress + continue (no action needed)
