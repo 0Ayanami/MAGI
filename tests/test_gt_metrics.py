@@ -2610,6 +2610,8 @@ def test_session_state_metrics_drain_to_jsonl():
             / "metrics.jsonl"
         )
         rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+        proxy._metric_file.close()
+        proxy._log_file.close()
 
     assert len(rows) == 1
     assert rows[0]["type"] == "gt_metric"

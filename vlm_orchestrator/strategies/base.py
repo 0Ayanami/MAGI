@@ -145,10 +145,15 @@ class SessionState:
     # falls back to slugifying ``original_instruction``. ---
     task_slug: str | None = None
 
+    semantic_summary: object | None = field(default=None, repr=False)
+    placement_window: object | None = field(default=None, repr=False)
+    last_memory_dispatch: tuple | None = None
+
     def log(self, entry: dict) -> None:
         """Append a structured log entry (written to JSONL by the proxy)."""
         entry.setdefault("timestamp", time.time())
         entry.setdefault("episode_id", self.episode_id)
+        entry.setdefault("sim_step", self.episode_step)
         self.log_entries.append(entry)
 
     def log_metric(self, event) -> None:

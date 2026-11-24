@@ -789,6 +789,12 @@ class OrchestratorProxy:
                     )
                     try:
                         response = await backend_conn.infer(vla_obs)
+                        if state.semantic_summary and state.rewritten_instruction:
+                            dispatch = (state.current_subgoal_idx, state.rewritten_instruction)
+                            if dispatch != state.last_memory_dispatch or state.flush_actions:
+                                state.semantic_summary.record(dispatch[1], state.episode_step, "policy",
+                                                              "issued", f"infer@{state.infer_count}")
+                                state.last_memory_dispatch = dispatch
                     except Exception as vla_err:
                         logger.error(
                             f"[VLA ERROR #{state.infer_count}] "

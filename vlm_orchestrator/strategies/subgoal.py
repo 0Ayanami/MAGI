@@ -129,6 +129,9 @@ class SubgoalConfig:
     vlm_max_tokens: int = 512
     vlm_base_url: str | None = None
     vlm_api_key: str | None = None
+    semantic_memory: str = "off"
+    visual_memory: str = "off"
+    visual_input: str = "history"
 
 
 # ======================================================================

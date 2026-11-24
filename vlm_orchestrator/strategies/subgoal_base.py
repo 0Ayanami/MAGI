@@ -39,6 +39,7 @@ from vlm_orchestrator.failure_handlers.gt_detector import (
 from vlm_orchestrator.vlm import encode_image_b64, parse_json
 
 from .base import OrchestrationStrategy, SessionState, StrategyContext
+from .episode_memory import EpisodeSummary, PlacementWindow, placement
 
 if TYPE_CHECKING:
     from vlm_orchestrator.failure_handlers.base import FailureHandler
@@ -620,6 +621,8 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
         for calls that need more room (e.g. recycle with many subgoals).
         """
         from vlm_orchestrator.vlm import chat_create
+        if getattr(self, "_call_state", None) is not None:
+            self._call_state.log({"type": "cloud_request", "model": self.config.vlm_model})
         response = chat_create(
             self.client,
             model=self.config.vlm_model,
@@ -630,6 +633,10 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
                 {"role": "user", "content": user_content},
             ],
         )
+        if getattr(self, "_call_state", None) is not None:
+            usage = getattr(response, "usage", None)
+            self._call_state.log({"type": "cloud_response", "model": self.config.vlm_model,
+                                  "tokens": getattr(usage, "total_tokens", None)})
         choice = response.choices[0]
         if choice.finish_reason == "length":
             logger.warning(
@@ -772,6 +779,7 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
     def process(
         self, obs: dict, state: SessionState
     ) -> tuple[dict, SessionState]:
+        self._call_state = state  # process() and cloud requests are synchronous
         prompt = self.ctx.get_prompt(obs)
         if prompt is None:
             return obs, state
@@ -786,6 +794,11 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
     def _on_new_episode(
         self, obs: dict, state: SessionState, prompt: str,
     ) -> tuple[dict, SessionState]:
+        state.semantic_summary = (EpisodeSummary(prompt)
+                                  if getattr(self.config, "semantic_memory", "off") == "episode" else None)
+        state.placement_window = (PlacementWindow(self.config.visual_input == "current")
+                                  if getattr(self.config, "visual_memory", "off") != "off" else None)
+        state.last_memory_dispatch = None
         state.original_instruction = prompt
         state.subgoals = []
         state.current_subgoal_idx = 0
@@ -1017,6 +1030,14 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
         # Replaces both GT detection and the old VLM subgoal check.
         # ==============================================================
         if self._failure_handler is not None:
+            window = state.placement_window
+            skill = state.rewritten_instruction or ""
+            if window and placement(skill):
+                handled = self._placement_step(obs, state, skill)
+                if handled:
+                    return self.ctx.set_prompt(obs, state.rewritten_instruction), state
+            elif window:
+                window.reset()
             handler_result = self._failure_handler.step(obs, state)
             if handler_result is not None:
                 obs, state = self._execute_handler_result(
@@ -1136,11 +1157,58 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
     # Handler result execution
     # ------------------------------------------------------------------
 
+    def _placement_step(self, obs, state, skill):
+        import os
+        from vlm_orchestrator.perception.gdino import GroundingDINODetector
+
+        window = state.placement_window
+        step = state.episode_step
+        try:
+            if not hasattr(self, "_placement_detector"):
+                model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
+                self._placement_detector = GroundingDINODetector(model)
+            window.observe(obs, self.ctx.get_vlm_image(obs), step, skill, self._placement_detector)
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            window.frames.clear()
+            state.log({"type": "placement_unavailable", "error": type(exc).__name__})
+
+        timeout = step - state.step_at_subgoal_start >= self._get_timeout(state)
+        due = self._failure_handler.due(step)
+        enforce = self.config.visual_memory == "enforce"
+        if not due and not timeout:
+            return False
+        if window.last_check is not None and step - window.last_check < self.config.check_interval:
+            return enforce
+        window.last_check = step
+        verdict = window.verdict()
+        refs = [f.step for f in window.frames]
+        state.log({"type": "placement_check", "skill": skill, "step": step,
+                   "verdict": verdict, "frames": refs, "timeout": timeout})
+        if not enforce:
+            return False
+        if verdict == "unknown":
+            result = self._failure_handler.step(obs, state, force=True)
+            if timeout and (result is None or result.action == ACTION_CONTINUE):
+                window.unknown_checks += 1
+                if window.unknown_checks == 2 and state.current_subgoal_idx < len(state.subgoals)-1:
+                    result = HandlerResult(STATUS_FAILURE, ACTION_REPLAN, "unresolved placement timeout")
+            if result:
+                self._execute_handler_result(obs, state, result)
+        else:
+            window.unknown_checks = 0
+            self._failure_handler.mark_checked(step)
+            if verdict == "stable":
+                self._execute_handler_result(obs, state, HandlerResult("complete", ACTION_NEXT),
+                                             source="vision", evidence=refs)
+            elif state.semantic_summary:
+                state.semantic_summary.record(skill, step, "vision", "in_progress", refs)
+        return True
+
     def _execute_handler_result(
         self,
         obs: dict,
         state: SessionState,
-        result: HandlerResult,
+        result: HandlerResult, *, source="vlm", evidence=None,
     ) -> tuple[dict, SessionState]:
         """Execute the action from a :class:`HandlerResult`.
 
@@ -1149,6 +1217,13 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
         sg_idx = state.current_subgoal_idx
         sg = state.subgoals[sg_idx] if state.subgoals else "?"
 
+        if state.semantic_summary:
+            ref = evidence if evidence is not None else f"vlm_detect@{state.episode_step}"
+            state.semantic_summary.conflict(result.reason, state.episode_step, ref)
+            if result.action == ACTION_NEXT or result.action == ACTION_REPLAN:
+                status = ("attempt_failed" if result.action == ACTION_REPLAN else
+                          "observed_complete" if source == "vision" else "model_complete")
+                state.semantic_summary.record(sg, state.episode_step, source, status, ref, result.reason)
         # VLMFailureHandler.step() already emitted a "vlm_detect" event
         # carrying status / action / reason / vlm_latency_s / vlm_raw —
         # no need to duplicate it here.  (Was previously logged as
@@ -3324,6 +3399,8 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
 
         Called after any subgoal change (advance, replan, recovery).
         """
+        if state.placement_window:
+            state.placement_window.reset()
         state.step_at_subgoal_start = state.episode_step
         state.step_at_last_check = state.episode_step
         self._failure_retries = 0
@@ -3392,6 +3469,8 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
 
     def _advance_subgoal(self, obs: dict, state: SessionState) -> None:
         """Move to the next subgoal.  Does NOT log — caller logs."""
+        if state.placement_window or state.semantic_summary:
+            state.flush_actions = True
         state.current_subgoal_idx += 1
         new_sg = state.subgoals[state.current_subgoal_idx]
         state.rewritten_instruction = new_sg
@@ -3446,6 +3525,8 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
                 f"\nORIGINAL SUBGOAL LIST (select ONLY from these, "
                 f"using the exact wording):\n{numbered}\n"
             )
+        if state.semantic_summary:
+            text += state.semantic_summary.prompt() + "\n"
         if regression_context:
             text += (
                 f"\n⚠️ SUBTASK REGRESSION DETECTED by the physics "

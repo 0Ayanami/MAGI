@@ -139,6 +139,8 @@ class Args:
     metadata lands under the proxy's ``orchestrator_episode_log_dir``.
     Set the proxy's ``--log-dir`` to control where outputs go."""
     seed: int = 7
+    score_placements: bool = False
+    """Record BDDL predicates locally before executing actions for offline scoring."""
 
     prompt_override: str = "__keep__"
     """Override every task's prompt with this string before sending
@@ -696,7 +698,7 @@ def eval_libero(args: Args) -> None:
                     # Build wire-format observation.
                     wire_obs = build_wire_obs(
                         obs, task_description, args.resize_size,
-                        ground_truth_done=done,
+                        ground_truth_done=done and not args.score_placements,
                         camera_K=camera_K,
                         camera_extrinsic=camera_extrinsic,
                         depth_near=depth_near,
@@ -845,7 +847,23 @@ def eval_libero(args: Args) -> None:
 
                     # Pop next action and execute in environment.
                     action = action_plan.popleft()
+                    if args.score_placements:
+                        raw_env = getattr(env, "env", env)
+                        goals = raw_env.parsed_problem["goal_state"]
+                        score_row = {
+                            "step": t, "instruction": last_response.get("orchestrator_instruction"),
+                            "goals": goals, "satisfied": [bool(raw_env._eval_predicate(p)) for p in goals],
+                            "held": [bool(raw_env._check_grasp(raw_env.robots[0].gripper,
+                                                              raw_env.objects_dict[p[1]].contact_geoms))
+                                     for p in goals],
+                            "relative": [(raw_env.sim.data.get_body_xpos(raw_env.objects_dict[p[1]].root_body)
+                                          - raw_env.sim.data.get_body_xpos(raw_env.objects_dict[p[2]].root_body)
+                                          ).tolist() for p in goals],
+                        }
                     obs, reward, done, info = env.step(action.tolist())
+                    if args.score_placements:
+                        score_row["after"] = [bool(raw_env._eval_predicate(p)) for p in goals]
+                        episode_metadata.setdefault("executed_steps", []).append(score_row)
 
                     # LIBERO-Mem: advance subgoal counters each step.
                     # Capture the return so the sequence-tracker `done`

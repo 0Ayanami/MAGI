@@ -166,6 +166,9 @@ def main():
              "'hybrid' uses VLM-gated advancement for ordered "
              "tasks and timer cycling for unordered tasks.",
     )
+    parser.add_argument("--semantic-memory", choices=["off", "episode"], default="off")
+    parser.add_argument("--visual-memory", choices=["off", "shadow", "enforce"], default="off")
+    parser.add_argument("--visual-input", choices=["history", "current"], default="history")
     parser.add_argument(
         "--check-interval",
         type=int,
@@ -611,6 +614,11 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.semantic_memory != "off" or args.visual_memory != "off":
+        if (args.mode, args.failure_monitor, args.recovery_mode) != ("subgoal", "vlm", "replan"):
+            parser.error("Memory requires --mode subgoal --failure-monitor vlm --recovery-mode replan")
+        if args.visual_memory != "off" and args.env != "libero":
+            parser.error("Visual placement verification requires --env libero")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1079,6 +1087,9 @@ def _build_strategy(args):
         )
 
         subgoal_config = SubgoalConfig(
+            semantic_memory=args.semantic_memory,
+            visual_memory=args.visual_memory,
+            visual_input=args.visual_input,
             check_mode=args.subgoal_check_mode,
             check_interval=args.check_interval,
             subgoal_timeout=args.subgoal_timeout,
