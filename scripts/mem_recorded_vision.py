@@ -1,6 +1,7 @@
 """Shadow replay of episode 0 of HuggingFaceVLA/libero, fixed SCENE5 agentview."""
 
 import io
+import argparse
 import json
 import os
 
@@ -15,12 +16,15 @@ from vlm_orchestrator.strategies.base import SessionState, StrategyContext
 from vlm_orchestrator.strategies.subgoal import SubgoalConfig, SubgoalStrategy
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=["shadow", "enforce"], default="shadow")
+args = parser.parse_args()
 suite = benchmark.get_benchmark_dict()["libero_10"]()
 task = suite.get_task(4)
 env, goal, K, extrinsic, _, _ = get_libero_env(task, 256, 7, camera_calibration=True)
 env.close()
 assert K is not None and extrinsic is not None
-strategy = SubgoalStrategy(StrategyContext(vlm=None), SubgoalConfig(visual_memory="shadow", check_interval=5),
+strategy = SubgoalStrategy(StrategyContext(vlm=None), SubgoalConfig(visual_memory=args.mode, check_interval=5),
                            failure_monitor="vlm", recovery_mode="replan")
 strategy._placement_detector = GroundingDINODetector(os.environ["VOLO_GDINO_MODEL"], device="cpu")
 skills = ["Put the white mug on the left plate", "Put the yellow and white mug on the right plate"]
@@ -44,9 +48,11 @@ for row in pq.read_table("data/mem/replay/file-000.parquet", columns=columns).to
            "observation/state": np.asarray(row["observation.state"]),
            "observation/camera_K": K, "observation/camera_extrinsic": extrinsic}
     state.episode_step = t
-    strategy.process(obs, state)
+    sent, _ = strategy.process(obs, state)
     for event in state.log_entries:
         if event["type"] == "placement_check":
-            print(json.dumps(event), flush=True)
+            print(json.dumps(dict(event, mode=args.mode, dispatched_prompt=sent["prompt"],
+                                  flush_actions=state.flush_actions)), flush=True)
+    state.flush_actions = False
     state.log_entries.clear()
     state.infer_count += 1

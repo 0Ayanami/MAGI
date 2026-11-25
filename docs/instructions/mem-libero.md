@@ -51,6 +51,7 @@ bash scripts/mem_libero.sh preflight
 mkdir -p data/mem/replay results/mem/recorded
 curl -fLsS https://hf-mirror.com/datasets/HuggingFaceVLA/libero/resolve/86958911c0f959db2bbbdb107eb3e17c5f9c798e/data/chunk-000/file-000.parquet -o data/mem/replay/file-000.parquet
 OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 OPENBLAS_NUM_THREADS=1 bash scripts/mem_libero.sh recorded > results/mem/recorded/vision.log
+OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 OPENBLAS_NUM_THREADS=1 bash scripts/mem_libero.sh recorded visual enforce > results/mem/recorded/vision-enforce.log
 ```
 
 本地运行 `.venv\Scripts\python.exe scripts/mem_cloud.py replay baseline controlled` 获取三次已标记的真实云端重规划。该命令使用同一个原版 recycle 提示词和输出解析器，返回剩余技能列表。

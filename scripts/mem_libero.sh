@@ -32,7 +32,7 @@ case "$run" in
         exec "$stage/openpi-env/bin/python" "$stage/src/openpi/scripts/serve_policy.py" --port 18002 policy:checkpoint --policy.config=pi05_libero --policy.dir="$stage/checkpoints/pi05_libero"
         ;;
     recorded)
-        exec "$py" scripts/mem_recorded_vision.py
+        exec "$py" scripts/mem_recorded_vision.py --mode "${3:-shadow}"
         ;;
     proxy|probe|replay)
         IFS= read -r VLM_API_KEY
