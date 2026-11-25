@@ -13,6 +13,7 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 
@@ -62,6 +63,8 @@ def chat_create(client, *, model: str, messages, temperature: float = 0.0,
     Caller can override any of these by passing the param in **extra.
     """
     kwargs = dict(model=model, messages=messages, **extra)
+    if model == "qwen3.5-plus-2026-04-20" and os.environ.get("VOLO_QWEN_NONTHINKING") == "1":
+        kwargs.setdefault("extra_body", {"enable_thinking": False})
     if is_reasoning_model(model):
         is_openai_reasoning = bool(_OPENAI_REASONING_RE.search(model))
         if is_openai_reasoning:

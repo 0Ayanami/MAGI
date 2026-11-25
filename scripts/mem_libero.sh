@@ -3,12 +3,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$(pwd -P)
 stage="$root/data/mem"
+export PYTHONPATH="$stage/src/LIBERO-f78abd68ee283de9f9be3c8f7e2a9ad60246e95c:$root${PYTHONPATH:+:$PYTHONPATH}"
 export LIBERO_CONFIG_PATH="$stage/config" TMPDIR="$stage/tmp" XDG_CACHE_HOME="$stage/cache"
 export HF_HOME="$stage/cache/hf" OPENPI_DATA_HOME="$stage/cache/openpi" HF_HUB_OFFLINE=1
 export MUJOCO_GL=egl PYTHONDONTWRITEBYTECODE=1 VOLO_GDINO_MODEL="$stage/gdino"
 export MPLCONFIGDIR="$stage/cache/matplotlib" NUMBA_CACHE_DIR="$stage/cache/numba"
 export CUDA_CACHE_PATH="$stage/cache/cuda" TRITON_CACHE_DIR="$stage/cache/triton"
-export VLM_MODEL=qwen3-vl-plus-2025-09-23
+export VLM_MODEL=qwen3.5-plus-2026-04-20
+export VOLO_QWEN_NONTHINKING=1
 export VLM_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
 py="$stage/libero-env/bin/python"
 run=${1:?choose preflight, policy, proxy, probe or eval}

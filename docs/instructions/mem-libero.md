@@ -29,7 +29,7 @@ py="$stage/libero-env/bin/python"
 uv pip install --python "$py" \
   'torch @ https://download.pytorch.org/whl/cpu/torch-2.5.1%2Bcpu-cp311-cp311-linux_x86_64.whl' \
   'torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.20.1%2Bcpu-cp311-cp311-linux_x86_64.whl' \
-  'numpy<2' robosuite==1.4.1 mujoco==3.3.7 bddl easydict gym==0.26.2 'imageio[ffmpeg]' tyro \
+  'numpy<2' matplotlib==3.10.7 robosuite==1.4.1 mujoco==3.3.7 bddl easydict gym==0.26.2 'imageio[ffmpeg]' tyro \
   transformers==4.49.0 pytest google-crc32c pyarrow==18.1.0 -e . -e "$lib" -e "$stage/src/openpi/packages/openpi-client"
 "$py" scripts/mem_checkpoint.py
 mkdir -p "$stage/cache/openpi/big_vision" "$stage/gdino"
@@ -45,7 +45,7 @@ bash scripts/mem_libero.sh preflight
 
 ## 下一阶段的运行命令
 
-获得实验指令后，在本地运行一次图像探针。启动器从本地 `.env` 读取 `DASHSCOPE_API_KEY`，经 SSH stdin 注入服务器进程。北京是配置默认值，新加坡凭据使用 `--region singapore`。探针会实际调用快照模型 `qwen3-vl-plus-2025-09-23`。
+获得实验指令后，在本地运行一次图像探针。启动器从本地 `.env` 读取 `DASHSCOPE_API_KEY`，经 SSH stdin 注入服务器进程。北京是配置默认值，新加坡凭据使用 `--region singapore`。探针会实际调用快照模型 `qwen3.5-plus-2026-04-20`。
 
 ```powershell
 .venv\Scripts\python.exe scripts/mem_cloud.py probe baseline probe

@@ -13,7 +13,8 @@ Image.new("RGB", (64, 64), "red").save(buf, format="PNG")
 url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 client = OpenAI(api_key=os.environ["VLM_API_KEY"], base_url=os.environ["VLM_BASE_URL"], max_retries=0)
 try:
-    result = client.chat.completions.create(model=os.environ["VLM_MODEL"], temperature=0, messages=[{
+    result = client.chat.completions.create(model=os.environ["VLM_MODEL"], temperature=0,
+                                            extra_body={"enable_thinking": False}, messages=[{
         "role": "user", "content": [{"type": "text", "text": 'Return JSON with a "color" field in English.'},
                                     {"type": "image_url", "image_url": {"url": url}}]}])
 except APIError as exc:
