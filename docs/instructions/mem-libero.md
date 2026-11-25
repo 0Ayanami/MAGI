@@ -29,7 +29,7 @@ py="$stage/libero-env/bin/python"
 uv pip install --python "$py" \
   'torch @ https://download.pytorch.org/whl/cpu/torch-2.5.1%2Bcpu-cp311-cp311-linux_x86_64.whl' \
   'torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.20.1%2Bcpu-cp311-cp311-linux_x86_64.whl' \
-  'numpy<2' matplotlib==3.10.7 robosuite==1.4.1 mujoco==3.3.7 bddl easydict gym==0.26.2 'imageio[ffmpeg]' tyro \
+  'numpy<2' h5py==3.16.0 matplotlib==3.10.7 robosuite==1.4.1 mujoco==3.3.7 bddl easydict gym==0.26.2 'imageio[ffmpeg]' tyro \
   transformers==4.49.0 pytest google-crc32c pyarrow==18.1.0 -e . -e "$lib" -e "$stage/src/openpi/packages/openpi-client"
 "$py" scripts/mem_checkpoint.py
 mkdir -p "$stage/cache/openpi/big_vision" "$stage/gdino"
@@ -43,7 +43,19 @@ bash scripts/mem_libero.sh preflight
 "$py" -m pytest -q tests/test_episode_memory.py tests/test_subgoal.py tests/test_libero.py tests/test_libero_benchmarks.py
 ```
 
-## 下一阶段的运行命令
+## 既有示范与受控重规划
+
+使用已发布数据集 `HuggingFaceVLA/libero` 的固定 revision，取双杯任务 episode 0。这段示范参与了白杯颜色筛选和相机镜像方向的核验，应作为开发集报告。视觉回放使用真实 RGB、机器人状态和固定外部相机标定，模拟云监控返回 continue。语义回放向真实云模型发送相同的两幅图，分别注入空摘要、曾经放稳、放稳后又失效三种条件。
+
+```bash
+mkdir -p data/mem/replay results/mem/recorded
+curl -fLsS https://hf-mirror.com/datasets/HuggingFaceVLA/libero/resolve/86958911c0f959db2bbbdb107eb3e17c5f9c798e/data/chunk-000/file-000.parquet -o data/mem/replay/file-000.parquet
+OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 OPENBLAS_NUM_THREADS=1 bash scripts/mem_libero.sh recorded > results/mem/recorded/vision.log
+```
+
+本地运行 `.venv\Scripts\python.exe scripts/mem_cloud.py replay baseline controlled` 获取三次已标记的真实云端重规划。该命令使用同一个原版 recycle 提示词和输出解析器，返回剩余技能列表。
+
+## 闭环运行命令
 
 获得实验指令后，在本地运行一次图像探针。启动器从本地 `.env` 读取 `DASHSCOPE_API_KEY`，经 SSH stdin 注入服务器进程。北京是配置默认值，新加坡凭据使用 `--region singapore`。探针会实际调用快照模型 `qwen3.5-plus-2026-04-20`。
 
