@@ -33,7 +33,7 @@ case "$run" in
         IFS= read -r VLM_API_KEY
         export VLM_API_KEY
         if [[ "$run" == probe ]]; then
-            exec "$py" scripts/mem_probe.py
+            exec "$root/.venv/bin/python" scripts/mem_probe.py
         fi
         batch=${3:?supply a fresh batch ID}
         [[ "$batch" =~ ^[[:alnum:]_-]+$ ]]
