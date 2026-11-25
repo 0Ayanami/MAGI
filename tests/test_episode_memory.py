@@ -16,7 +16,7 @@ class ColorDetector:
     """Test perception backend measures labelled pixels in constructed RGB frames."""
 
     def detect(self, image, phrase, score_threshold):
-        color = {"white mug": (255, 0, 0), "robot gripper": (0, 255, 0),
+        color = {"mug": (220, 220, 220), "robot gripper": (0, 255, 0),
                  "plate": (0, 0, 255)}[phrase]
         y, x = np.where(np.all(image == color, axis=-1))
         return [{"box": [x.min(), y.min(), x.max(), y.max()]}] if x.size else []
@@ -26,7 +26,7 @@ def frame(x, hand, opened, missing=False):
     rgb = np.zeros((100, 100, 3), np.uint8)
     rgb[50:57, 42:72, 2] = 255
     if not missing:
-        rgb[40:52, x-2:x+3] = [255, 0, 0]
+        rgb[40:52, x-2:x+3] = [220, 220, 220]
     rgb[41:49, hand-1:hand+2] = [0, 255, 0]
     q = .04 if opened else .019
     return {"observation/image_raw": rgb, "observation/state": np.array([hand/100, 0, 0, 0, 0, 0, q, -q]),
@@ -97,6 +97,29 @@ def test_expiry_occlusion_timeout_and_final_continue():
     assert tick(40, *RELEASE[-1]) == PLACE
     assert len(calls) == 3
     assert not state.flush_actions
+
+
+def test_mirrored_camera_and_mug_identity():
+    from vlm_orchestrator.strategies.episode_memory import PlacementWindow
+
+    class SceneDetector:
+        def detect(self, image, phrase, score_threshold):
+            boxes = {"mug": [[15, 35, 25, 52], [70, 35, 80, 52]],
+                     "plate": [[5, 50, 35, 60], [60, 50, 90, 60]]}
+            return [{"box": box} for box in boxes[phrase]]
+
+    rgb = np.zeros((100, 100, 3), np.uint8)
+    rgb[35:53, 15:26] = (222, 202, 55)
+    rgb[35:53, 70:81] = 200
+    obs = {"observation/state": np.array([-.26, -.06, 1, 0, 0, 0, .02, -.02]),
+           "observation/camera_K": np.array([[100, 0, 50], [0, 100, 50], [0, 0, 1]]),
+           "observation/camera_extrinsic": np.eye(4)}
+    window = PlacementWindow()
+    window.observe(obs, rgb, 5, "Put the white mug on the left plate", SceneDetector())
+    sample, = window.frames
+    assert sample.on_plate
+    assert np.allclose(sample.obj, [.75, .435])
+    assert np.allclose(sample.hand, [.75, .44])
 
 
 def test_persistent_unknown_replans_and_clears_window():

@@ -141,6 +141,8 @@ class Args:
     seed: int = 7
     score_placements: bool = False
     """Record BDDL predicates locally before executing actions for offline scoring."""
+    camera_calibration: bool = False
+    """Send fixed camera calibration to the proxy for projecting proprioception."""
 
     prompt_override: str = "__keep__"
     """Override every task's prompt with this string before sending
@@ -342,7 +344,7 @@ def build_wire_obs(
 # Environment helpers
 # ──────────────────────────────────────────────────────────────────
 
-def get_libero_env(task, resolution: int, seed: int, enable_depth: bool = False):
+def get_libero_env(task, resolution: int, seed: int, enable_depth: bool = False, camera_calibration=False):
     """Initialise and return a LIBERO environment + task description.
 
     When ``enable_depth=True``, the environment renders depth images
@@ -374,7 +376,7 @@ def get_libero_env(task, resolution: int, seed: int, enable_depth: bool = False)
     camera_extrinsic = None
     depth_near = 0.01
     depth_far = 50.0
-    if enable_depth:
+    if enable_depth or camera_calibration:
         try:
             from robosuite.utils.camera_utils import (
                 get_camera_intrinsic_matrix,
@@ -601,6 +603,7 @@ def eval_libero(args: Args) -> None:
         env, task_description, camera_K, camera_extrinsic, depth_near, depth_far = get_libero_env(
             task, LIBERO_ENV_RESOLUTION, args.seed,
             enable_depth=args.enable_depth,
+            camera_calibration=args.camera_calibration,
         )
         if args.prompt_override != "__keep__":
             task_description = args.prompt_override

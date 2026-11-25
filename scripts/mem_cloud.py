@@ -6,7 +6,7 @@ import re
 import subprocess
 
 parser = argparse.ArgumentParser()
-parser.add_argument("operation", choices=["proxy", "probe"])
+parser.add_argument("operation", choices=["proxy", "probe", "replay"])
 parser.add_argument("arm", choices=["baseline", "semantic", "visual", "dual", "current"])
 parser.add_argument("batch", type=str)
 parser.add_argument("--region", choices=["beijing", "singapore"], default="beijing")

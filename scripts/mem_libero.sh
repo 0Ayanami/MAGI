@@ -31,11 +31,17 @@ case "$run" in
     policy)
         exec "$stage/openpi-env/bin/python" "$stage/src/openpi/scripts/serve_policy.py" --port 18002 policy:checkpoint --policy.config=pi05_libero --policy.dir="$stage/checkpoints/pi05_libero"
         ;;
-    proxy|probe)
+    recorded)
+        exec "$py" scripts/mem_recorded_vision.py
+        ;;
+    proxy|probe|replay)
         IFS= read -r VLM_API_KEY
         export VLM_API_KEY
         if [[ "$run" == probe ]]; then
             exec "$root/.venv/bin/python" scripts/mem_probe.py
+        fi
+        if [[ "$run" == replay ]]; then
+            exec "$py" scripts/mem_recorded_replan.py
         fi
         batch=${3:?supply a fresh batch ID}
         [[ "$batch" =~ ^[[:alnum:]_-]+$ ]]
@@ -59,7 +65,7 @@ case "$run" in
             match=LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate
             if [[ "$suite" == libero_10 ]]; then match+=_and_put_the_yellow_and_white_mug_on_the_right_plate; fi
             "$py" examples/libero/libero_eval_client.py --host 127.0.0.1 --port 18001 --task-suite-name "$suite" \
-                --task-filter "$match" --max-tasks 1 --seed 7 --num-trials-per-task 1 --replan-steps 5 --score-placements
+                --task-filter "$match" --max-tasks 1 --seed 7 --num-trials-per-task 1 --replan-steps 5 --score-placements --camera-calibration
         done
         echo "$(( SECONDS - start ))" > "$out/eval_wall_s"
         ;;

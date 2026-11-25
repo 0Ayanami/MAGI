@@ -74,6 +74,21 @@ class Sample:
     ee: np.ndarray
 
 
+def mug_color_matches(image, box, name):
+    """Reject yellow/white confusion using pixels inside each detected mug."""
+    h, w = image.shape[:2]
+    x, y, right, bottom = np.clip(box, 0, [w, h, w, h]).astype(int)
+    roi = image[y:bottom+1, x:right+1].astype(float)
+    if not roi.size:
+        return False
+    red, green, blue = roi.transpose(2, 0, 1)
+    yellow = np.mean((red > blue*1.17+6) & (green > blue*1.14+5) & (green > red*.86))
+    if name.startswith("yellow"):
+        return yellow > .09
+    neutral = np.mean((np.ptp(roi, axis=2) < 18) & (roi.mean(axis=2) > 45))
+    return neutral > .25 and yellow < .04
+
+
 class PlacementWindow:
     """Coordinates in image-width/height units, finger opening in metres."""
 
@@ -105,13 +120,27 @@ class PlacementWindow:
             return
         h, w = image.shape[:2]
         boxes = []
-        for phrase in (relation[0], "robot gripper", "plate"):
+        for phrase in ("mug", "robot gripper", "plate"):
+            if phrase == "robot gripper" and "observation/camera_K" in obs and "observation/camera_extrinsic" in obs:
+                K = np.asarray(obs["observation/camera_K"]).reshape(3, 3)
+                pose = np.asarray(obs["observation/camera_extrinsic"]).reshape(4, 4)
+                camera_point = pose[:3, :3].T @ (joints[:3] - pose[:3, 3])
+                uv = K @ camera_point
+                if uv[2] <= 0 or not np.isfinite(uv).all():
+                    self.frames.clear()
+                    return
+                # LIBERO's policy RGB has an extra horizontal mirror.
+                hand = (np.array([w-1-uv[0]/uv[2], uv[1]/uv[2]]) / [w, h])
+                boxes.append(np.tile(hand, 2))
+                continue
             hits = detector.detect(image, phrase, score_threshold=0.40)
+            if phrase == "mug":
+                hits = [hit for hit in hits if mug_color_matches(image, hit["box"], relation[0])]
             candidates = sorted((np.asarray(hit["box"]) / [w, h, w, h] for hit in hits),
                                 key=lambda box: box[0])
             if phrase == "plate" and relation[1] and len(candidates) == 2:
                 if candidates[0][2] < candidates[1][0]:
-                    candidates = [candidates[int(relation[1] == "right")]]
+                    candidates = [candidates[int(relation[1] == "left")]]
             elif phrase == "plate" and relation[1]:
                 candidates = []  # one visible plate cannot establish left/right
             if len(candidates) != 1:
