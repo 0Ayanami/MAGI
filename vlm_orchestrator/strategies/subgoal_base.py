@@ -1168,34 +1168,49 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
         timeout = step - state.step_at_subgoal_start >= self._get_timeout(state)
         due = self._failure_handler.due(step)
         enforce = self.config.visual_memory == "enforce"
-        if not due and not timeout:
-            return False
-        if window.last_check is not None and step - window.last_check < self.config.check_interval:
-            return enforce
-        window.last_check = step
-        candidates, detect_s = 0, 0.0
-        started = time.perf_counter()
-        try:
-            if not hasattr(self, "_placement_detector"):
-                model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
-                self._placement_detector = GroundingDINODetector(model)
-            goal = (state.original_instruction or "").lower()
-            returning = (re.search(r"\b(?:pick up|lift) (?:the |a )?(?:bowl|bottle)\b", goal)
-                         and re.search(r"\b(?:put|place) it (?:back|down|on)\b", goal))
-            initial_image = state.initial_image if returning else None
-            candidates, detect_s = window.measure(self._placement_detector, initial_image)
-        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
-            detect_s = time.perf_counter() - started
-            window.frames.clear()
-            state.log({"type": "placement_unavailable", "error": type(exc).__name__})
-        verdict = window.verdict()
+        requested = due or timeout
+        cooling_down = window.last_check is not None and step - window.last_check < self.config.check_interval
+        scheduled = requested and not cooling_down
+        candidates = window.candidates(allow_carrying=scheduled)
+        early_release = (candidates.release_step is not None
+                         and state.current_subgoal_idx < len(state.subgoals) - 1)
+        if not scheduled and not early_release:
+            return enforce and requested
+        if scheduled:
+            window.last_check = step
+        window.frames.clear()
+        reason, detect_s = candidates.reason, 0.0
+        verdict = "unknown"
+        if candidates.observations:
+            started = time.perf_counter()
+            try:
+                if not hasattr(self, "_placement_detector"):
+                    model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
+                    self._placement_detector = GroundingDINODetector(model)
+                goal = (state.original_instruction or "").lower()
+                returning = (re.search(r"\b(?:pick up|lift) (?:the |a )?(?:bowl|bottle)\b", goal)
+                             and re.search(r"\b(?:put|place) it (?:back|down|on)\b", goal))
+                initial_image = state.initial_image if returning else None
+                verdict, detect_s = window.measure(candidates, self._placement_detector, initial_image)
+                reason = verdict if verdict != "unknown" else window.evidence_reason
+            except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                detect_s = time.perf_counter() - started
+                window.frames.clear()
+                if candidates.release_step is not None:
+                    window.last_release = candidates.release_step
+                    window.release_retry_anchor = None
+                reason = "detector_error"
+                state.log({"type": "placement_unavailable", "error": type(exc).__name__})
         refs = [f.step for f in window.frames]
         state.log({"type": "placement_check", "skill": skill, "step": step,
                    "verdict": verdict, "frames": refs, "timeout": timeout,
-                   "candidate_frames": candidates, "detection_s": detect_s})
+                   "candidate_frames": len(candidates.observations), "detection_s": detect_s,
+                   "evidence_reason": reason, "scheduled": scheduled})
         if not enforce:
             return False
         if verdict == "unknown":
+            if not scheduled:
+                return timeout
             result = self._failure_handler.step(obs, state, force=True)
             if timeout and (result is None or result.action == ACTION_CONTINUE):
                 window.unknown_checks += 1
