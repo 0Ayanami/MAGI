@@ -131,6 +131,7 @@ class PlacementWindow:
         limit = 1 if current_only else 8
         self.frames = deque(maxlen=limit)
         self.observations = deque(maxlen=limit)
+        self.plate_anchors = {}
         self.capture_step = None
         self.skill = None
         self.last_step = None
@@ -165,7 +166,7 @@ class PlacementWindow:
             step, inputs, image.copy(), float(np.mean(np.abs(joints[-2:]))), joints[:3].copy(),
         ))
 
-    def measure(self, detector):
+    def measure(self, detector, initial_image=None):
         """Detect at most four frames per check after rejecting impossible kinematics."""
         self.frames.clear()
         observations = list(self.observations)
@@ -184,7 +185,7 @@ class PlacementWindow:
                 selected = [held, *recent]
         started = perf_counter()
         for item in selected:
-            self._measure_frame(item.obs, item.image, item.step, self.skill, detector)
+            self._measure_frame(item.obs, item.image, item.step, self.skill, detector, initial_image)
             if not self.frames:
                 break
         return len(selected), perf_counter() - started
@@ -199,7 +200,25 @@ class PlacementWindow:
         self.last_step = step
         self._measure_frame(obs, image, step, skill, detector)
 
-    def _measure_frame(self, obs, image, step, skill, detector):
+    def _origin_plate(self, initial_image, label, detector):
+        """Find the unique plate directly supporting the object at episode start."""
+        if label not in self.plate_anchors and initial_image is not None:
+            h, w = initial_image.shape[:2]
+            objects = detector.detect(initial_image, label, score_threshold=.40)
+            anchor = None
+            if len(objects) == 1:
+                left, _, right, bottom = objects[0]["box"]
+                foot = np.array([(left + right) / 2, bottom])
+                plates = [np.asarray(hit["box"]) for hit in
+                          detector.detect(initial_image, "plate", score_threshold=.40)]
+                supports = [box for box in plates if np.all(box[:2] <= foot) and np.all(foot <= box[2:])]
+                if len(supports) == 1:
+                    box = supports[0]
+                    anchor = (box[:2] + box[2:]) / [2*w, 2*h]
+            self.plate_anchors[label] = anchor
+        return self.plate_anchors.get(label)
+
+    def _measure_frame(self, obs, image, step, skill, detector, initial_image=None):
         relation = placement(skill)
         joints = np.asarray(obs.get("observation/state", [])).ravel()
         if image is None or not relation or joints.size != 8 or not np.isfinite(joints).all():
@@ -231,6 +250,10 @@ class PlacementWindow:
                     candidates = [candidates[int(relation[1] == "left")]]
             elif phrase == "plate" and relation[1]:
                 candidates = []  # one visible plate cannot establish left/right
+            elif phrase == "plate" and label in {"bowl", "bottle"} and initial_image is not None:
+                anchor = self._origin_plate(initial_image, label, detector)
+                candidates = [box for box in candidates if anchor is not None
+                              and np.linalg.norm((box[:2] + box[2:])/2 - anchor) < .06]
             if len(candidates) != 1:
                 self.frames.clear()
                 return

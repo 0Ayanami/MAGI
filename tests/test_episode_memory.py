@@ -183,3 +183,23 @@ def test_bowl_confirmation_runs_detector_only_at_the_check(lifted):
     assert tick(20, *RELEASE[-1]) == NEXT
     assert strategy._placement_detector.calls == (12 if lifted else 0)
     assert len(requests) == (1 if lifted else 2) and state.flush_actions
+
+
+def test_return_to_original_plate_uses_initial_support_evidence():
+    from vlm_orchestrator.strategies.episode_memory import PlacementWindow
+
+    class SceneDetector:
+        def detect(self, image, phrase, score_threshold):
+            boxes = {"bowl": [[47, 40, 53, 52]], "robot gripper": [[54, 40, 56, 49]],
+                     "plate": [[40, 50, 60, 60], [70, 50, 89, 61]]}
+            return [{"box": box} for box in boxes[phrase]]
+
+    window = PlacementWindow()
+    skill = "Place the bowl back on the plate"
+    obs = frame(50, 55, False)
+    rgb = obs["observation/image_raw"]
+    window._measure_frame(obs, rgb, 5, skill, SceneDetector())
+    assert not window.frames
+    window._measure_frame(obs, rgb, 5, skill, SceneDetector(), initial_image=rgb)
+    sample, = window.frames
+    assert sample.on_plate and np.allclose(sample.plate, [.5, .55])

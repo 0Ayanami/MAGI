@@ -12,6 +12,7 @@ decomposition format, check logic, and any per-frame processing.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -1178,7 +1179,11 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
             if not hasattr(self, "_placement_detector"):
                 model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
                 self._placement_detector = GroundingDINODetector(model)
-            candidates, detect_s = window.measure(self._placement_detector)
+            goal = (state.original_instruction or "").lower()
+            returning = (re.search(r"\b(?:pick up|lift) (?:the |a )?(?:bowl|bottle)\b", goal)
+                         and re.search(r"\b(?:put|place) it (?:back|down|on)\b", goal))
+            initial_image = state.initial_image if returning else None
+            candidates, detect_s = window.measure(self._placement_detector, initial_image)
         except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
             detect_s = time.perf_counter() - started
             window.frames.clear()
