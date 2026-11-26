@@ -14,7 +14,7 @@ def placement(instruction):
     text = instruction.lower().replace("-", " ")
     match = re.search(
         r"\b((?:yellow and white|white) (?:mug|cup)|bowl|bottle)\b.*?"
-        r"\bon(?:to| top of)? (?:the |a )?(?:(left|right) )?plate\b", text,
+        r"\bon(?:to| top of)? (?:the |a )?(?:(left|right|same|original) )?plate\b", text,
     )
     if not match or not re.search(r"\b(?:put|place|set)\b", text):
         return None
@@ -24,7 +24,8 @@ def placement(instruction):
         return None
     if re.search(r"\b(?:[2-9]|\d{2,}|two|three|four|five|six|seven|eight|nine|ten)\s+times\b", text):
         return None
-    return match[1].replace("cup", "mug"), match[2] or ""
+    side = match[2] if match[2] in {"left", "right"} else ""
+    return match[1].replace("cup", "mug"), side
 
 
 class EpisodeSummary:

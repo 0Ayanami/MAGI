@@ -28,6 +28,7 @@ Usage::
 
 import argparse
 import collections
+import hashlib
 import json
 import logging
 import math
@@ -448,6 +449,7 @@ def main():
                 "task_language": language,
                 "episode_idx": ep_idx,
                 "init_state_idx": init_idx,
+                "init_state_sha256": hashlib.sha256(np.asarray(init_states[init_idx]).tobytes()).hexdigest(),
                 "start_time": time.time(),
                 "orchestrator_subgoals": None,
                 "orchestrator_instructions": [],
@@ -480,6 +482,8 @@ def main():
 
                 if args.score_progress and t == args.num_steps_wait:
                     ep_meta["completed_before_execution"] = len(env.env.get_satisfied_subgoals(language))
+                    warmed = env.env.sim.get_state().flatten()
+                    ep_meta["warmed_state_sha256"] = hashlib.sha256(warmed.tobytes()).hexdigest()
 
                 # Build observation
                 wire_obs = build_wire_obs(
@@ -495,6 +499,8 @@ def main():
                 # and rotates its per-episode log dir.  Without this
                 # all episodes write into the first episode's dir.
                 wire_obs["__episode_id"] = f"{task_id}_{ep_idx}"
+                if args.score_progress:
+                    wire_obs["__step"] = t
 
                 if gt_exporter is not None:
                     try:
@@ -614,22 +620,15 @@ def main():
                         break
                     raise
 
-                # CRITICAL: Advance the Mem subgoal counter AND capture
-                # the actual sequence-goal success signal.
-                #
-                # LIBERO-Mem's `_check_success` only mutates internal
-                # counters (`_sub_goal_live_time`, `_satisfied_subgoals`)
-                # when called with `inc=True`.  The base env's step()
-                # calls `_check_success()` without inc, so the `done` it
-                # returns never fires on Mem sequence-goal tasks.  We OR
-                # the `inc=True` return into `done` to terminate early
-                # on full task success instead of running to max_steps.
+                # The upstream sequence predicate also returns True on
+                # intermediate completions. Only the entire sequence may
+                # end the episode as a success.
                 mem_done = bool(env.env._check_success(inc=True))
-                if mem_done:
-                    done = True
+                if mem_done or args.score_progress:
+                    completed = len(env.env.get_satisfied_subgoals(language))
+                done = mem_done and completed >= n_subgoals
 
                 if args.score_progress:
-                    completed = len(env.env.get_satisfied_subgoals(language))
                     ep_meta.setdefault("executed_steps", []).append({
                         "step": t,
                         "instruction": last_response.get("orchestrator_instruction"),

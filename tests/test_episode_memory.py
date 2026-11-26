@@ -161,6 +161,7 @@ def test_repetition_keeps_distinct_placement_occurrences():
     skill = "Put the bowl back on the plate"
     summary = EpisodeSummary(skill + " three times")
     assert placement(skill) == ("bowl", "")
+    assert placement("Place the grey bowl back on the same plate") == ("bowl", "")
     assert placement(summary.goal) is None
     assert placement("Place the two bowls on the plate") is None
     assert placement("Place the bowl on the plate and open the drawer") is None

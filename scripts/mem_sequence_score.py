@@ -20,6 +20,7 @@ def read_cases(root):
         verdicts = Counter(event["verdict"] for event in checks)
         responses = [event.get("tokens") for event in events if event["type"] == "cloud_response"]
         calls = sum(event["type"] == "cloud_request" for event in events)
+        full = metadata["n_subgoals_completed"] == metadata["n_subgoals_total"]
         dispatches = []
         completions = []
         previous = None
@@ -34,7 +35,10 @@ def read_cases(root):
                 completions.append((row["step"], count))
         yield {
             "arm": arm, "task_id": metadata["task_id"], "language": metadata["task_language"],
-            "init": metadata["init_state_idx"], "success": metadata["success"],
+            "init": metadata["init_state_idx"], "success": metadata["success"] and full,
+            "partial_termination": metadata["success"] and not full,
+            "init_state_sha256": metadata.get("init_state_sha256"),
+            "warmed_state_sha256": metadata.get("warmed_state_sha256"),
             "completed": metadata["n_subgoals_completed"], "available": metadata["n_subgoals_total"],
             "scr": metadata["tiered_success"], "episode_s": round(metadata["duration_s"], 3),
             "eval_wall_s": int((folder / "eval_wall_s").read_text()),
@@ -44,6 +48,7 @@ def read_cases(root):
             "vlm_replan_requests": sum(e["type"] == "vlm_detect" and e.get("action") == "replan" for e in events),
             "visual_carrying": verdicts["carrying"], "visual_stable": verdicts["stable"],
             "visual_unknown": verdicts["unknown"],
+            "visual_checks_with_frames": sum(bool(e["frames"]) for e in checks),
             "visual_detection_s": round(sum(e.get("detection_s", 0) for e in checks), 3),
             "executed_dispatches": len(dispatches),
             "dispatch_trace": json.dumps(dispatches, ensure_ascii=False),
@@ -60,9 +65,15 @@ def aggregate(rows):
         assert row["arm"] not in arms, (key, row["arm"])
         arms[row["arm"]] = row
     pairs = [p for p in groups.values() if set(p) == {"baseline", "dual"}]
+    for pair in pairs:
+        a, b = pair["baseline"], pair["dual"]
+        assert a["init_state_sha256"] == b["init_state_sha256"], (a["task_id"], a["init"])
     report = {"runs": len(rows), "pairs": len(pairs), "paired_outcomes": [
         {key: p["baseline"][key] for key in ("task_id", "init")}
         | {arm: {field: p[arm][field] for field in ("success", "scr", "episode_s")} for arm in p}
+        | {"same_warmed_state": (p["baseline"]["warmed_state_sha256"] == p["dual"]["warmed_state_sha256"]
+                                 if p["baseline"]["warmed_state_sha256"] and p["dual"]["warmed_state_sha256"]
+                                 else None)}
         for p in pairs
     ]}
     for arm in ("baseline", "dual"):
@@ -70,7 +81,8 @@ def aggregate(rows):
         totals = {key: sum(r[key] for r in records)
                   for key in ("success", "completed", "available", "cloud_calls", "cloud_responses",
                               "eval_wall_s", "replans", "vlm_replan_requests", "visual_carrying",
-                              "visual_stable", "visual_unknown", "visual_detection_s", "executed_dispatches")}
+                              "visual_stable", "visual_unknown", "visual_checks_with_frames",
+                              "visual_detection_s", "executed_dispatches")}
         totals["mean_scr"] = mean(r["scr"] for r in records) if records else None
         totals["tokens"] = (sum(r["tokens"] for r in records)
                             if all(r["tokens"] is not None for r in records) else None)

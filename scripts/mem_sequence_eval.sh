@@ -110,8 +110,8 @@ PY
 }
 
 pair=0
-for task in "${tasks[@]}"; do
-    for init in "${states[@]}"; do
+for init in "${states[@]}"; do
+    for task in "${tasks[@]}"; do
         if ((pair % 2 == 0)); then order=(baseline dual); else order=(dual baseline); fi
         for arm in "${order[@]}"; do run_case "$arm" "$task" "$init"; done
         pair=$((pair + 1))
