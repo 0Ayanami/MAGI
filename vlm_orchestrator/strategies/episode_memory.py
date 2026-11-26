@@ -4,17 +4,25 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 import json
 import re
+from time import perf_counter
 
 import numpy as np
 
 
 def placement(instruction):
-    """Identify the supported atomic LIBERO mug-on-plate relation."""
+    """Identify an atomic placement whose object and plate can be associated visually."""
     text = instruction.lower().replace("-", " ")
-    match = re.search(r"\b((?:yellow and white|white) (?:mug|cup))\b.*?\bon(?:to| top of)? (?:the |a )?(?:(left|right) )?plate\b", text)
-    if not match or not re.search(r"\b(put|place|set)\b", text):
+    match = re.search(
+        r"\b((?:yellow and white|white) (?:mug|cup)|bowl|bottle)\b.*?"
+        r"\bon(?:to| top of)? (?:the |a )?(?:(left|right) )?plate\b", text,
+    )
+    if not match or not re.search(r"\b(?:put|place|set)\b", text):
         return None
-    if len(re.findall(r"\b(?:mug|cup)\b", text)) != 1:
+    if len(re.findall(r"\b(?:mug|cup|bowl|bottle|plate)\b", text)) != 2:
+        return None
+    if re.search(r"\b(?:and|then|before|after|while)\b", text[match.end():]):
+        return None
+    if re.search(r"\b(?:[2-9]|\d{2,}|two|three|four|five|six|seven|eight|nine|ten)\s+times\b", text):
         return None
     return match[1].replace("cup", "mug"), match[2] or ""
 
@@ -24,14 +32,25 @@ class EpisodeSummary:
         self.goal = goal
         self.events = deque(maxlen=24)
         self.results = OrderedDict()
+        self.repeated_placement = bool(re.search(
+            r"\b(?:[2-9]|\d{2,}|two|three|four|five|six|seven|eight|nine|ten)\s+times\b", goal, re.I,
+        ))
+        self.placement_cycles = OrderedDict()
 
-    def record(self, skill, step, source, status, evidence, reason=""):
+    def record(self, skill, step, source, status, evidence, reason="", occurrence=None):
         entry = dict(skill=skill[:256], step=step, source=source, status=status,
                      evidence=evidence, reason=reason[:240])
         self.events.append(entry)
         if status in {"issued", "attempt_failed"}:
             return
         relation = placement(skill)
+        if self.repeated_placement and relation and occurrence is not None:
+            if status in {"observed_complete", "model_complete"}:
+                previous = self.placement_cycles.get(occurrence)
+                if previous is None or status == "observed_complete":
+                    self.placement_cycles[occurrence] = dict(entry, occurrence=occurrence)
+                    if len(self.placement_cycles) > 16:
+                        self.placement_cycles.popitem(last=False)
         key = relation or skill.casefold()
         if (status == "in_progress" and key in self.results
                 and self.results[key]["status"] in {"observed_complete", "model_complete"}):
@@ -57,10 +76,17 @@ class EpisodeSummary:
 
     def prompt(self):
         data = dict(goal=self.goal, results=list(self.results.values()), recent=list(self.events))
+        repetition = ""
+        if self.repeated_placement:
+            data["placement_cycles"] = list(self.placement_cycles.values())
+            repetition = ("For repetition, use placement_cycles as the ledger. Count each observed "
+                          "lift-and-return once, even if the relation is the same. A model-only "
+                          "completion still needs verification and a stationary object does not "
+                          "establish another cycle. ")
         return ("\nEpisode evidence (instructions issued are attempts). Preserve supported "
                 "results that still hold in NOW, revisit invalid or uncertain prerequisites, "
                 "and preserve the original order and repetition requirements.\n" +
-                json.dumps(data, ensure_ascii=False))
+                repetition + json.dumps(data, ensure_ascii=False))
 
 
 @dataclass
@@ -70,6 +96,15 @@ class Sample:
     hand: np.ndarray
     plate: np.ndarray
     on_plate: bool
+    width: float
+    ee: np.ndarray
+
+
+@dataclass
+class PlacementObservation:
+    step: int
+    obs: dict
+    image: np.ndarray
     width: float
     ee: np.ndarray
 
@@ -93,7 +128,10 @@ class PlacementWindow:
     """Coordinates in image-width/height units, finger opening in metres."""
 
     def __init__(self, current_only=False):
-        self.frames = deque(maxlen=1 if current_only else 8)
+        limit = 1 if current_only else 8
+        self.frames = deque(maxlen=limit)
+        self.observations = deque(maxlen=limit)
+        self.capture_step = None
         self.skill = None
         self.last_step = None
         self.last_check = None
@@ -101,9 +139,51 @@ class PlacementWindow:
 
     def reset(self, skill=None):
         self.frames.clear()
+        self.observations.clear()
+        self.capture_step = None
         self.skill = skill
         self.last_step = self.last_check = None
         self.unknown_checks = 0
+
+    def capture(self, obs, image, step, skill):
+        """Save cheap observation history without running the detector on the control path."""
+        if self.skill != skill:
+            self.reset(skill)
+        if self.capture_step == step:
+            return
+        if self.capture_step is not None and not 0 < step - self.capture_step <= 10:
+            self.observations.clear()
+        self.capture_step = step
+        joints = np.asarray(obs.get("observation/state", [])).ravel()
+        if image is None or joints.size != 8 or not np.isfinite(joints).all():
+            self.observations.clear()
+            return
+        fields = ("observation/camera_K", "observation/camera_extrinsic")
+        inputs = {key: np.array(obs[key], copy=True) for key in fields if key in obs}
+        inputs["observation/state"] = joints.copy()
+        self.observations.append(PlacementObservation(
+            step, inputs, image.copy(), float(np.mean(np.abs(joints[-2:]))), joints[:3].copy(),
+        ))
+
+    def measure(self, detector):
+        """Detect at most four frames per check after rejecting impossible kinematics."""
+        self.frames.clear()
+        observations = list(self.observations)
+        recent = observations[-3:]
+        selected = []
+        if len(recent) == 3 and all(item.width < .032 for item in recent):
+            if np.linalg.norm(recent[-1].ee - recent[0].ee) > .015:
+                selected = recent
+        elif len(recent) == 3 and all(item.width > .033 for item in recent):
+            held = next((item for item in reversed(observations[:-3]) if item.width < .032), None)
+            if held is not None and np.linalg.norm(recent[-1].ee - held.ee) > .015:
+                selected = [held, *recent]
+        started = perf_counter()
+        for item in selected:
+            self._measure_frame(item.obs, item.image, item.step, self.skill, detector)
+            if not self.frames:
+                break
+        return len(selected), perf_counter() - started
 
     def observe(self, obs, image, step, skill, detector):
         if self.skill != skill:
@@ -113,6 +193,9 @@ class PlacementWindow:
         if self.last_step is not None and not 0 < step - self.last_step <= 10:
             self.frames.clear()
         self.last_step = step
+        self._measure_frame(obs, image, step, skill, detector)
+
+    def _measure_frame(self, obs, image, step, skill, detector):
         relation = placement(skill)
         joints = np.asarray(obs.get("observation/state", [])).ravel()
         if image is None or not relation or joints.size != 8 or not np.isfinite(joints).all():
@@ -120,7 +203,8 @@ class PlacementWindow:
             return
         h, w = image.shape[:2]
         boxes = []
-        for phrase in ("mug", "robot gripper", "plate"):
+        label = "mug" if relation[0].endswith("mug") else relation[0]
+        for phrase in (label, "robot gripper", "plate"):
             if phrase == "robot gripper" and "observation/camera_K" in obs and "observation/camera_extrinsic" in obs:
                 K = np.asarray(obs["observation/camera_K"]).reshape(3, 3)
                 pose = np.asarray(obs["observation/camera_extrinsic"]).reshape(4, 4)

@@ -15,8 +15,12 @@ GOAL = PLACE + " and then open the drawer"
 class ColorDetector:
     """Test perception backend measures labelled pixels in constructed RGB frames."""
 
+    def __init__(self):
+        self.calls = 0
+
     def detect(self, image, phrase, score_threshold):
-        color = {"mug": (220, 220, 220), "robot gripper": (0, 255, 0),
+        self.calls += 1
+        color = {"mug": (220, 220, 220), "bowl": (220, 220, 220), "robot gripper": (0, 255, 0),
                  "plate": (0, 0, 255)}[phrase]
         y, x = np.where(np.all(image == color, axis=-1))
         return [{"box": [x.min(), y.min(), x.max(), y.max()]}] if x.size else []
@@ -89,7 +93,7 @@ def test_expiry_occlusion_timeout_and_final_continue():
     _, state, calls, tick = replay(timeout=15, monitor="continue", goals=[PLACE])
     tick(5, *RELEASE[0])
     assert tick(18, *RELEASE[1]) == PLACE
-    assert [f.step for f in state.placement_window.frames] == [18]
+    assert [f.step for f in state.placement_window.observations] == [18]
     assert tick(19, 53, 60, True, True) == PLACE
     assert not state.placement_window.frames
     tick(20, *RELEASE[-1])
@@ -149,3 +153,31 @@ def test_replan_same_image_uses_episode_evidence(regressed):
     tick(0, *RELEASE[0])
     assert not state.semantic_summary.events
     assert not state.placement_window.frames
+
+
+def test_repetition_keeps_distinct_placement_occurrences():
+    from vlm_orchestrator.strategies.episode_memory import EpisodeSummary, placement
+
+    skill = "Put the bowl back on the plate"
+    summary = EpisodeSummary(skill + " three times")
+    assert placement(skill) == ("bowl", "")
+    assert placement(summary.goal) is None
+    assert placement("Place the two bowls on the plate") is None
+    assert placement("Place the bowl on the plate and open the drawer") is None
+    summary.record(skill, 20, "vlm", "model_complete", "vlm@20", occurrence=(0, 0))
+    summary.record(skill, 25, "vlm", "model_complete", "vlm@25", occurrence=(0, 0))
+    summary.record(skill, 45, "vision", "observed_complete", [35, 40, 45], occurrence=(1, 20))
+    cycles = list(summary.placement_cycles.values())
+    assert [(e["step"], e["status"]) for e in cycles] == [(20, "model_complete"), (45, "observed_complete")]
+    assert '"placement_cycles"' in summary.prompt()
+
+
+def test_bowl_confirmation_runs_detector_only_at_the_check():
+    skill = "Place the bowl back on the plate"
+    strategy, state, requests, tick = replay(goals=[skill, NEXT], timeout=20)
+    for i, values in enumerate(RELEASE[:-1], 1):
+        assert tick(i * 5, *values) == skill
+    assert strategy._placement_detector.calls == 0
+    assert tick(20, *RELEASE[-1]) == NEXT
+    assert strategy._placement_detector.calls == 12
+    assert len(requests) == 1 and state.flush_actions

@@ -78,7 +78,7 @@ TASK_SUBGOAL_COUNTS = {
 def get_max_steps_for_task(task_name: str) -> int:
     """Determine max steps based on task's subgoal count."""
     for prefix, n_subgoals in TASK_SUBGOAL_COUNTS.items():
-        if task_name.startswith(prefix):
+        if task_name.startswith(prefix + "_"):
             return max(STEPS_PER_SUBGOAL * n_subgoals, MIN_STEPS)
     return 600  # fallback
 
@@ -86,7 +86,7 @@ def get_max_steps_for_task(task_name: str) -> int:
 def get_num_subgoals(task_name: str) -> int:
     """Get the number of subgoals for a task."""
     for prefix, n_subgoals in TASK_SUBGOAL_COUNTS.items():
-        if task_name.startswith(prefix):
+        if task_name.startswith(prefix + "_"):
             return n_subgoals
     return 1
 
@@ -265,11 +265,21 @@ def parse_args():
                     help="Warmup steps before policy takes over")
     p.add_argument("--enable-gt-state", action="store_true")
     p.add_argument("--enable-depth", action="store_true")
+    p.add_argument("--camera-calibration", action="store_true",
+                    help="Send calibrated camera matrices without depth images")
+    p.add_argument("--score-progress", action="store_true",
+                    help="Record executed subgoals and sequence progress in client logs only")
+    p.add_argument("--initial-state-offset", type=int, default=0)
     p.add_argument("--task-ids", type=str, default="",
                     help="Comma-separated task indices (0-9), empty=all")
     p.add_argument("--save-video", action="store_true", default=True)
     p.add_argument("--no-video", action="store_true")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.score_progress and args.enable_gt_state:
+        p.error("--score-progress keeps benchmark state on the client; omit --enable-gt-state")
+    if args.initial_state_offset < 0:
+        p.error("--initial-state-offset must be nonnegative")
+    return args
 
 
 def main():
@@ -351,7 +361,7 @@ def main():
         camera_extrinsic = None
         depth_near = 0.01
         depth_far = 50.0
-        if args.enable_depth:
+        if args.enable_depth or args.camera_calibration:
             try:
                 from robosuite.utils.camera_utils import (
                     get_camera_intrinsic_matrix,
@@ -418,7 +428,7 @@ def main():
 
         for ep_idx in range(args.num_trials_per_task):
             # Pick init state (cycle if fewer than num_trials)
-            init_idx = ep_idx % len(init_states)
+            init_idx = (ep_idx + args.initial_state_offset) % len(init_states)
 
             logger.info(f"  Episode {ep_idx+1}/{args.num_trials_per_task} "
                          f"(init_state={init_idx})")
@@ -435,6 +445,7 @@ def main():
 
             ep_meta = {
                 "task_id": task_id,
+                "task_language": language,
                 "episode_idx": ep_idx,
                 "init_state_idx": init_idx,
                 "start_time": time.time(),
@@ -467,10 +478,13 @@ def main():
                     t += 1
                     continue
 
+                if args.score_progress and t == args.num_steps_wait:
+                    ep_meta["completed_before_execution"] = len(env.env.get_satisfied_subgoals(language))
+
                 # Build observation
                 wire_obs = build_wire_obs(
                     obs, language, args.resize_size,
-                    ground_truth_done=done,
+                    ground_truth_done=done and not args.score_progress,
                     camera_K=camera_K,
                     camera_extrinsic=camera_extrinsic,
                     depth_near=depth_near,
@@ -613,6 +627,15 @@ def main():
                 mem_done = bool(env.env._check_success(inc=True))
                 if mem_done:
                     done = True
+
+                if args.score_progress:
+                    completed = len(env.env.get_satisfied_subgoals(language))
+                    ep_meta.setdefault("executed_steps", []).append({
+                        "step": t,
+                        "instruction": last_response.get("orchestrator_instruction"),
+                        "subgoal_idx": last_response.get("orchestrator_subgoal_idx"),
+                        "completed_after": completed,
+                    })
 
                 if done:
                     break

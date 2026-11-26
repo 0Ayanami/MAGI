@@ -1163,15 +1163,7 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
 
         window = state.placement_window
         step = state.episode_step
-        try:
-            if not hasattr(self, "_placement_detector"):
-                model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
-                self._placement_detector = GroundingDINODetector(model)
-            window.observe(obs, self.ctx.get_vlm_image(obs), step, skill, self._placement_detector)
-        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
-            window.frames.clear()
-            state.log({"type": "placement_unavailable", "error": type(exc).__name__})
-
+        window.capture(obs, self.ctx.get_vlm_image(obs), step, skill)
         timeout = step - state.step_at_subgoal_start >= self._get_timeout(state)
         due = self._failure_handler.due(step)
         enforce = self.config.visual_memory == "enforce"
@@ -1180,10 +1172,22 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
         if window.last_check is not None and step - window.last_check < self.config.check_interval:
             return enforce
         window.last_check = step
+        candidates, detect_s = 0, 0.0
+        started = time.perf_counter()
+        try:
+            if not hasattr(self, "_placement_detector"):
+                model = os.environ.get("VOLO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny")
+                self._placement_detector = GroundingDINODetector(model)
+            candidates, detect_s = window.measure(self._placement_detector)
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            detect_s = time.perf_counter() - started
+            window.frames.clear()
+            state.log({"type": "placement_unavailable", "error": type(exc).__name__})
         verdict = window.verdict()
         refs = [f.step for f in window.frames]
         state.log({"type": "placement_check", "skill": skill, "step": step,
-                   "verdict": verdict, "frames": refs, "timeout": timeout})
+                   "verdict": verdict, "frames": refs, "timeout": timeout,
+                   "candidate_frames": candidates, "detection_s": detect_s})
         if not enforce:
             return False
         if verdict == "unknown":
@@ -1223,7 +1227,9 @@ class SubgoalBaseStrategy(OrchestrationStrategy):
             if result.action == ACTION_NEXT or result.action == ACTION_REPLAN:
                 status = ("attempt_failed" if result.action == ACTION_REPLAN else
                           "observed_complete" if source == "vision" else "model_complete")
-                state.semantic_summary.record(sg, state.episode_step, source, status, ref, result.reason)
+                occurrence = (sg_idx, state.step_at_subgoal_start)
+                state.semantic_summary.record(sg, state.episode_step, source, status, ref,
+                                              result.reason, occurrence=occurrence)
         # VLMFailureHandler.step() already emitted a "vlm_detect" event
         # carrying status / action / reason / vlm_latency_s / vlm_raw —
         # no need to duplicate it here.  (Was previously logged as

@@ -12,7 +12,7 @@ def relation_index(instruction, goals):
     relation = placement(instruction or "")
     if not relation:
         return None
-    obj = {"white mug": "porcelain_mug_1", "yellow and white mug": "white_yellow_mug_1"}[relation[0]]
+    obj = {"white mug": "porcelain_mug_1", "yellow and white mug": "white_yellow_mug_1"}.get(relation[0])
     support = {"left": "plate_1", "right": "plate_2"}.get(relation[1])
     return next((i for i, (_, o, plate) in enumerate(goals)
                  if o == obj and (support is None or support == plate)), None)
