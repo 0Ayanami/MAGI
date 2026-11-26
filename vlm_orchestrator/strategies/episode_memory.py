@@ -175,7 +175,11 @@ class PlacementWindow:
             if np.linalg.norm(recent[-1].ee - recent[0].ee) > .015:
                 selected = recent
         elif len(recent) == 3 and all(item.width > .033 for item in recent):
-            held = next((item for item in reversed(observations[:-3]) if item.width < .032), None)
+            relation = placement(self.skill or "")
+            require_lift = relation is not None and relation[0] in {"bowl", "bottle"}
+            held = next((item for item in reversed(observations[:-3])
+                         if item.width < .032 and
+                         (not require_lift or item.ee[2] - recent[0].ee[2] > .015)), None)
             if held is not None and np.linalg.norm(recent[-1].ee - held.ee) > .015:
                 selected = [held, *recent]
         started = perf_counter()
@@ -244,6 +248,8 @@ class PlacementWindow:
         if len(frames) >= 3:
             recent = frames[-3:]
             a, b = recent[0], recent[-1]
+            match = placement(self.skill or "")
+            require_lift = match is not None and match[0] in {"bowl", "bottle"}
             if (all(f.width < .032 and norm(f.hand - f.obj) < .14 for f in recent)
                     and norm(b.ee - a.ee) > .015 and norm(b.obj - a.obj) > .025
                     and all(norm((f.obj-a.obj) - (f.hand-a.hand)) < .025 for f in recent)):
@@ -253,7 +259,11 @@ class PlacementWindow:
                     and any(f.width < .032 and norm(f.hand-f.obj) < .14
                             and norm(f.obj-a.obj) < .09
                             and norm(b.hand-b.obj) - norm(f.hand-f.obj) > .045
-                            and norm(b.ee-f.ee) > .015 for f in frames[:-3])
+                            and norm(b.ee-f.ee) > .015
+                            and (not require_lift or (
+                                f.ee[2] - a.ee[2] > .015
+                                and norm((f.obj-f.plate) - (a.obj-a.plate)) > .025
+                            )) for f in frames[:-3])
                     and norm(b.hand-b.obj) > .12):
                 return "stable"
         return "unknown"

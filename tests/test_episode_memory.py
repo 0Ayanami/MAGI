@@ -26,14 +26,14 @@ class ColorDetector:
         return [{"box": [x.min(), y.min(), x.max(), y.max()]}] if x.size else []
 
 
-def frame(x, hand, opened, missing=False):
+def frame(x, hand, opened, missing=False, height=0):
     rgb = np.zeros((100, 100, 3), np.uint8)
     rgb[50:57, 42:72, 2] = 255
     if not missing:
         rgb[40:52, x-2:x+3] = [220, 220, 220]
     rgb[41:49, hand-1:hand+2] = [0, 255, 0]
     q = .04 if opened else .019
-    return {"observation/image_raw": rgb, "observation/state": np.array([hand/100, 0, 0, 0, 0, 0, q, -q]),
+    return {"observation/image_raw": rgb, "observation/state": np.array([hand/100, 0, height, 0, 0, 0, q, -q]),
             "prompt": GOAL}
 
 
@@ -172,12 +172,14 @@ def test_repetition_keeps_distinct_placement_occurrences():
     assert '"placement_cycles"' in summary.prompt()
 
 
-def test_bowl_confirmation_runs_detector_only_at_the_check():
+@pytest.mark.parametrize("lifted", [True, False])
+def test_bowl_confirmation_runs_detector_only_at_the_check(lifted):
     skill = "Place the bowl back on the plate"
     strategy, state, requests, tick = replay(goals=[skill, NEXT], timeout=20)
-    for i, values in enumerate(RELEASE[:-1], 1):
-        assert tick(i * 5, *values) == skill
+    assert tick(5, 48, 49, False, False, .04 if lifted else 0) == skill
+    assert tick(10, *RELEASE[1]) == skill
+    assert tick(15, *RELEASE[2]) == skill
     assert strategy._placement_detector.calls == 0
     assert tick(20, *RELEASE[-1]) == NEXT
-    assert strategy._placement_detector.calls == 12
-    assert len(requests) == 1 and state.flush_actions
+    assert strategy._placement_detector.calls == (12 if lifted else 0)
+    assert len(requests) == (1 if lifted else 2) and state.flush_actions
